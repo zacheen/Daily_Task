@@ -1,0 +1,21 @@
+{
+  "_comment": "config.json 的範本。config.json 被 gitignore，所以 schema 靠這個檔案留在版控裡。複製成 config.json 後填入實際內容。",
+  "names": {
+    "latin": [
+      "Given Family",
+      "Given",
+      "Preferred Name"
+    ],
+    "han": [
+      "中文姓名"
+    ]
+  },
+  "excludedSenders": [
+    "high-volume-sender@example.com"
+  ],
+  "_excludedSenders_note": "每次搜尋都會加上 -from:<這裡的每一筆>。用來擋掉自己架的爬蟲或訂閱源那種一天幾十封、沒有一封需要通知的寄件人。放在這個 gitignore 的檔案裡而不是寫死在腳本裡，因為真實信箱地址不該進公開 remote。空陣列或讀不到都等於不排除，那個方向只是多花 token，不會漏信。",
+  "calendarIcsUrls": [
+    "https://calendar.google.com/calendar/ical/.../private-.../basic.ics"
+  ],
+  "_calendarIcsUrls_note": "Google 日曆設定 -> 選左邊那個日曆 -> 整合日曆 -> iCal 格式的私人網址。一個網址只涵蓋一個日曆，訂閱的群組日曆要各自加一條。這串網址等於密碼，拿到的人可以讀整個日曆，所以只放在這個 gitignore 的檔案裡。空陣列代表跳過日曆檢查，那時活動一律當成不在日曆。"
+}

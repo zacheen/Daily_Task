@@ -1,3 +1,43 @@
+# Runtime state for the Gmail check tasks. Rewritten on every run and
+# machine-specific, so committing it would cause constant conflicts and could
+# rewind coverage on checkout, silently re-notifying or skipping mail.
+Email_Check/state.json
+# Schema-migration backups, which carry real mail summaries.
+Email_Check/state.json.*
+# Every atomic write statemachine.py makes lands here first: state.json,
+# the archive, and the round scratch all share this temp prefix.
+Email_Check/.sm.*.tmp
+
+# Per-round scratch handed between the statemachine subcommands. Meaningless
+# outside a single run; a leftover file just means a run died mid-round.
+Email_Check/round.json
+Email_Check/round-progress.json
+
+# Holds the user's real name forms, the senders every search excludes, and the
+# secret iCal URLs, which are themselves credentials. Kept out of git so
+# personal data stays off the remote; config.example.json carries the schema.
+Email_Check/config.json
+Email_Check/__pycache__/
+
+# Todo list runtime data. Contains real mail subjects and senders.
+Email_Check/todos-checked.json
+Email_Check/todos-archive.json
+Email_Check/.gui.*.tmp
+
+# Calendar feed cache. Derived, and holds real event titles.
+Email_Check/calendar-cache.json
+
+# GUI-owned requests. Consumed by the state machine each round.
+Email_Check/todos-restore.json
+Email_Check/todos-promote.json
+
+# Task folders that work with personal data. Excluded wholesale rather than by
+# subpath, because a single stray file is enough to leak. Each is versioned in
+# its own private repo. This rule lives here rather than .git/info/exclude so
+# that it survives being copied into a fresh repo, which is when an accidental
+# `git add .` would otherwise sweep the whole folder in.
+Qualification/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
