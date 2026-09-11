@@ -53,6 +53,32 @@ Gmail MCP 工具的 account 參數一定要傳 `"scout"`。這個帳號代號是
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" <subcommand>
 ```
 
+### 只能跑清單上那幾行命令
+
+allowlist 是逐字比對的，**不在上面的命令會停在權限提示，而排程執行時沒有人會按允許**。
+所以整輪能跑的 Bash 與 PowerShell 命令就是下面這個封閉清單，沒有第五種。
+
+| 命令 | 在哪一步 |
+|---|---|
+| `statemachine.py` 的 `begin` / `step` / `commit` | 第 1、3、6 步 |
+| `calendar_check.py` | 第 4 步 |
+| `notify.ps1` | 第 5 步 |
+| `open-todo-gui.ps1` | 第 7 步 |
+
+**不要為了省 token 自己拼一行命令去翻檔案。** 這是真的發生過的故障。
+有一輪讀完內文、正要寫 `round.json` 之前，跑了一行
+`conda run -n ML python -c ...` 去印 `statemachine.py` 裡 `cmd_step` 的原始碼，
+卡在提示上，整輪就停在那裡。省用量原則在這一條前面要讓位，
+因為卡住的代價是整輪歸零，省下的只是幾百個 token。
+
+那行命令就算有人按了允許也跑不起來。`conda run` 不支援參數裡含換行，
+多行的 `python -c` 會直接拋 `NotImplementedError`，所以它本來就是死路。
+
+要看檔案內容一律用 **Read 工具**，它涵蓋 `Email_Check/` 底下所有檔案，不會提示。
+
+這份文件的 status 表加上第 6 步的 `round.json` 格式就是**完整的介面契約**，
+跟腳本內部怎麼實作無關。
+
 ### 規則要同時放兩層
 
 **這些規則要同時放在專案的 `.claude/settings.local.json` 與使用者層的
@@ -100,6 +126,9 @@ Qualification 任務每天寫 `Qualification/reports/` 與 `Qualification/baseli
 | `mcp__gmail__get_email_body` | 讀內文 |
 | `Read(Email_Check/**)` 與絕對路徑版 | 讀這個檔案與 config.json |
 | `Edit(Email_Check/**)` 與絕對路徑版 | 寫 round.json |
+| `Bash(grep:*)` / `Bash(sed -n:*)` / `Bash(head:*)` / `Bash(tail:*)` | 唯讀的保險絲，見上一節，正常流程不該用到 |
+
+那四條唯讀形式是保險絲，不是許可，不能拿來翻 `statemachine.py` 的原始碼。
 
 兩層設定檔裡另外還留著一條舊的 `Start-Process` 規則，它直接寫死本機的
 `pythonw.exe` 路徑。**已無呼叫端，保留備查，不要改回去用它。** 那個路徑含本機使用者
@@ -558,6 +587,18 @@ toast。** 提到 LinkedIn、Handshake 這些平台的「職缺推播」是另�
              "uncertain": false}]
 }
 ```
+
+**`step` 與 `commit` 讀這個檔案的方式非常寬鬆，只有三種情況算讀不出來。**
+
+1. JSON 語法壞掉，parse 不過
+2. 最外層不是一個物件
+3. `roundToken` 有填但跟這輪不符
+
+其他一律沒事。檔案不存在等於空的、少填的欄位等於空陣列、多填的欄位被忽略、
+`roundToken` 整個不填也會通過。上面那個範本是**欄位總覽，不是必填清單**。
+
+少填欄位不會讓這輪死在 `FINDINGS_UNREADABLE`，代價寫在下面各欄位自己的說明裡，
+是那封信留在佇列或漏掉一則通知，不是整輪中止。
 
 **每一筆 `important` / `defer` / `todos` 都一定要帶 Gmail 的 message `id`。**
 `id` 填成空字串、`None` 或 `null` 一律等於沒填，那筆會變成永遠無法解決的孤兒，
