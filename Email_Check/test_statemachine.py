@@ -83,6 +83,7 @@ st2 = sm.State({"horizon": 100, "roundSeq": 9,
 d = st2.split_debt()
 check("overdue item surfaced", [x["id"] for x in d["judgeOverdue"]] == ["old"], d["judgeOverdue"])
 check("fresh item stays in judgeNow", [x["id"] for x in d["judgeNow"]] == ["new"])
+check("no read budget is advertised", [k for k in d if "udget" in k] == [], list(d))
 
 # --- notified wins over failed for the same id ---
 st3 = sm.State({"horizon": 100, "roundSeq": 1})
@@ -94,24 +95,24 @@ a3 = json.load(open(sm.STATE_PATH, encoding="utf-8"))
 check("successfully notified id not left in pendingNotify", a3["pendingNotify"] == [], a3["pendingNotify"])
 check("notified id recorded", "m1" in a3["notifiedIds"])
 
-# --- queue debt survives when the LLM was never shown it ---
-# The OOP review found this by execution: split_debt only exposes the first
-# DEBT_BODY_BUDGET fresh items, so wholesale-replacing the queue at commit
-# dropped every item beyond the slice with no error.
+# --- the whole judge queue is handed out, and unreported debt still survives ---
+# No round-level read cap, so every fresh item must be visible; keep-by-default
+# still matters, since a round can die after reporting only part of what it
+# judged, and wholesale-replacing the queue at commit would drop the rest.
 st4 = sm.State({"horizon": 100, "roundSeq": 7,
                 "pendingJudge": [{"id": "old-A", "firstDeferredRound": 7},
                                  {"id": "old-B", "firstDeferredRound": 7},
                                  {"id": "old-C", "firstDeferredRound": 7}]})
 st4.save(); sm.Progress(200).save()
 shown = [x["id"] for x in st4.split_debt()["judgeNow"]]
-check("budget slice hides the third fresh item", shown == ["old-A", "old-B"], shown)
-# A perfectly obedient LLM can only re-defer what it was shown.
+check("every fresh item is handed out", shown == ["old-A", "old-B", "old-C"], shown)
+# A round that crashed mid-report only re-defers part of what it was shown.
 json.dump({"defer": [{"id": "old-A"}, {"id": "old-B"}]},
           open(sm.ROUND_PATH, "w", encoding="utf-8"))
 sm.cmd_commit(None)
 a4 = json.load(open(sm.STATE_PATH, encoding="utf-8"))
 ids4 = sorted(x["id"] for x in a4["pendingJudge"])
-check("unshown judge debt survives commit", ids4 == ["old-A", "old-B", "old-C"], ids4)
+check("judge debt left off the report survives commit", ids4 == ["old-A", "old-B", "old-C"], ids4)
 
 # --- judgedIds is the only way an item leaves the judge queue ---
 st5 = sm.State({"horizon": 100, "roundSeq": 8,

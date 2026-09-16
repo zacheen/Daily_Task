@@ -48,8 +48,6 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 
 MAX_RESULTS = 40
 MAX_SEARCHES_PER_ROUND = 5
-BODY_BUDGET = 3
-DEBT_BODY_BUDGET = 2
 BOUNDARY_SLACK = 900
 # Months a bare MM-DD may lag the current month before it is read as next year
 # rather than as recently overdue. Mirrors the viewer's own constant.
@@ -520,9 +518,10 @@ class State:
     def reconcile_notify(self, failed: list[dict], notified: set[str]) -> None:
         """Keep anything not explicitly resolved.
 
-        The LLM only ever sees a budget-limited slice of these queues, so
-        treating "not re-listed this round" as "resolved" drops debt it was
-        never shown. A freshly reported summary supersedes the stored one.
+        A round can die between begin and commit, so treating "not re-listed
+        this round" as "resolved" would drop debt nobody ever decided about.
+        notifiedIds is the only thing that clears an entry. A freshly reported
+        summary supersedes the stored one.
         """
         kept: dict[str, dict] = {}
         orphans: dict[str, dict] = {}
@@ -887,9 +886,10 @@ class State:
         return dropped
 
     def split_debt(self, ticked: set[str] | None = None) -> dict[str, Any]:
-        """Old debt may take at most DEBT_BODY_BUDGET reads so new mail keeps a
-        slot. Items past the wait limit are surfaced, never dropped, because
-        running out of budget is not evidence a message is unimportant.
+        """Hands out the whole judge queue (no per-round read cap). Items past
+        the wait limit move to judgeOverdue for a needs-checking toast instead
+        of queueing indefinitely, since failing to reach a verdict is not
+        evidence a message is unimportant.
 
         Age is counted in rounds via roundSeq, not elapsed seconds, so a paused
         app or a catch-up burst cannot distort it.
@@ -904,8 +904,8 @@ class State:
         overdue, fresh = [], []
         for item in self.pendingJudge:
             # An id-less entry cannot be fetched or resolved by the LLM, so it
-            # must not consume body-read budget or sit in a bucket forever
-            # pretending to be actionable debt. orphan_count is how it surfaces.
+            # must not sit in this bucket forever as fake debt; orphan_count
+            # is how it surfaces instead.
             if _usable_id(item) is None:
                 continue
             first = int(item.get("firstDeferredRound", self.roundSeq))
@@ -915,9 +915,7 @@ class State:
             "notifyNow": [i for i in self.pendingNotify
                           if _usable_id(i) not in ticked],
             "judgeOverdue": overdue,
-            "judgeNow": fresh[:DEBT_BODY_BUDGET],
-            "bodyBudgetTotal": BODY_BUDGET,
-            "bodyBudgetForDebt": min(DEBT_BODY_BUDGET, len(fresh)),
+            "judgeNow": fresh,
         }
 
 
