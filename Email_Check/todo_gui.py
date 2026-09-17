@@ -581,7 +581,8 @@ function fillNotices(items){
 
 // Everything that locates the original mail. scout is a forwarding hub, so
 // the sender names neither the account holding it nor when that account
-// took delivery. Returns whether anything was written.
+// took delivery. The return says whether anything landed, which is how the
+// notice and archive rows avoid appending an empty meta div.
 function appendSource(meta, item){
   if(item.received) meta.append(Object.assign(el('span','box'),
       {textContent:'收信 ' + item.received}), document.createTextNode('  '));
