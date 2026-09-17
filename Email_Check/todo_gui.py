@@ -291,6 +291,7 @@ def api_archive():
             "subject": a.get("subject") or "(no subject)",
             "sender": a.get("from") or "",
             "mailbox": a.get("mailbox") or "",
+            "received": a.get("received") or "",
             "action": a.get("action") or "",
             "deadline": a.get("deadline") or "",
             "daysLeft": max(0, left),
@@ -377,6 +378,7 @@ def api_todos():
             "subject": t.get("subject") or "(no subject)",
             "sender": t.get("from") or "",
             "mailbox": t.get("mailbox") or "",
+            "received": t.get("received") or "",
             "action": t.get("action") or "",
             "deadline": t.get("deadline") or "",
             "uncertain": bool(t.get("uncertain")),
@@ -395,6 +397,7 @@ def api_todos():
         "subject": n.get("subject") or n.get("summary") or "(no subject)",
         "sender": n.get("from") or "",
         "mailbox": n.get("mailbox") or "",
+        "received": n.get("received") or "",
         "summary": n.get("summary") or n.get("action") or "",
         "pending": _usable_id(n) is not None and _usable_id(n) in promoting,
     } for n in notices]
@@ -576,10 +579,12 @@ function fillNotices(items){
   for(const n of items) list.append(noticeRow(n));
 }
 
-// scout is a forwarding hub, so sender alone doesn't name the account with
-// the original -- showing mailbox alongside it does. Returns whether
-// anything was written.
+// Everything that locates the original mail. scout is a forwarding hub, so
+// the sender names neither the account holding it nor when that account
+// took delivery. Returns whether anything was written.
 function appendSource(meta, item){
+  if(item.received) meta.append(Object.assign(el('span','box'),
+      {textContent:'收信 ' + item.received}), document.createTextNode('  '));
   if(item.sender) meta.append(document.createTextNode(item.sender));
   if(item.mailbox){
     const b = el('span','box');

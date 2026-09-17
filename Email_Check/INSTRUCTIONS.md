@@ -583,15 +583,16 @@ toast。** 提到 LinkedIn、Handshake 這些平台的「職缺推播」是另�
 {
   "roundToken": "begin 回傳的那個字串，原樣照抄",
   "important": [{"id": "...", "from": "...", "subject": "...",
-                 "mailbox": "搜尋結果那一欄，原樣照抄", "summary": "一行摘要"}],
+                 "mailbox": "搜尋結果那兩欄，原樣照抄", "received": "...",
+                 "summary": "一行摘要"}],
   "notifiedIds": ["至少一個通知管道確定送達的 id"],
   "configAlerted": true,
   "judgedIds": ["判定完成、不需要再追的 id"],
   "defer": [{"id": "...", "from": "...", "subject": "...", "mailbox": "...",
-             "snippet": "..."}],
+             "received": "...", "snippet": "..."}],
   "todos": [{"id": "...", "from": "...", "subject": "...", "mailbox": "...",
-             "action": "一行下一步動作", "deadline": "2026-09-15 或空字串",
-             "uncertain": false}]
+             "received": "...", "action": "一行下一步動作",
+             "deadline": "2026-09-15 或空字串", "uncertain": false}]
 }
 ```
 
@@ -626,12 +627,20 @@ token 不符會被當成讀取失敗而保留區間，那是安全方向；漏�
 `important` 放**這一批判定為重要的每一封信**，不分它會不會進待辦。
 `summary` 就是你要寫進推播的那一行文字。
 
-**`important`、`todos`、`defer` 三者都要帶 `mailbox`。** 那一欄直接照抄搜尋結果，
-不要自己推。它是這封信原本寄到哪個信箱，使用者要靠它知道回哪個帳號翻原信。
+**`important`、`todos`、`defer` 三者都要帶 `mailbox` 跟 `received`。**
+兩欄都直接照抄搜尋結果，不要自己推、也不要自己換算時間。
+
+`mailbox` 是這封信原本寄到哪個信箱，使用者要靠它知道回哪個帳號翻原信。
 `scout` 是轉信中心，寄件人只說了誰寄的，沒說信現在躺在哪個帳號裡。
 信直接寄到中心本身時那一欄就是 `scout` 這個代號，MCP 已經把實際地址換掉了，
 所以照抄不會違反「不要寫出地址」那條。
-漏填只是那一列少一行提示，不會讓這輪失敗。
+
+`received` 是那個信箱收到信的時間，MCP 給的已經是本地時間。
+**不要拿 `date` 代替它。** `date` 是寄件者自己寫的，落後 internalDate 的差值
+沒有上限，而 Gmail 是照 internalDate 排序和顯示的，所以只有 `received`
+對得上使用者在信箱裡看到的時間。
+
+兩欄漏填都只是那一列少一行提示，不會讓這輪失敗。
 
 `from` 跟 `subject` 也要填。通知成功之後，腳本會把這一筆搬進待辦清單的
 「重要事項」那一區給使用者裁決，那一區的每一列就是靠這三個欄位顯示的。
@@ -688,8 +697,9 @@ token 不符會被當成讀取失敗而保留區間，那是安全方向；漏�
 攢到最後才寫的話，中途當機那一批的待辦會永久消失，而覆蓋已經推進過去了。
 
 `defer` 放讀完內文仍然判不出來、或內文根本取不到的信。
-存 `from` / `subject` / `mailbox` / `snippet` 而不是只存 id，同樣是因為之後拿不回上下文。
-這封信後來變成待辦時，`mailbox` 只能從這裡抄，水位已經蓋過去了。
+存 `from` / `subject` / `mailbox` / `received` / `snippet` 而不是只存 id，
+同樣是因為之後拿不回上下文。這封信後來變成待辦時，`mailbox` 與 `received`
+只能從這裡抄，水位已經蓋過去了。
 `firstDeferredRound` **不要自己填**，腳本會保留最早的那一次。
 自己填會把等待時鐘歸零，讓「等太久就發待確認」永遠不觸發。
 

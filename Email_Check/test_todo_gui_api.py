@@ -69,6 +69,7 @@ write(tg.STATE_PATH, {
     "roundSeq": 12,
     "todos": [{"id": "old1", "subject": "older todo", "createdRound": 11,
                "from": "reg@school.edu", "mailbox": "me@school.edu",
+               "received": "2026-10-01 08:14",
                "action": "do the thing", "deadline": "2026-10-02"},
               {"id": "new1", "subject": "newer todo", "createdRound": 12,
                "deadline": "2026-09-15", "uncertain": True}],
@@ -94,6 +95,9 @@ check("a todo carries its mailbox too",
 check("a todo stored before the field existed serves an empty one, not a KeyError",
       [t["mailbox"] for t in d["todos"] if t["id"] == "new1"] == [""],
       d["todos"])
+check("the received stamp rides along too, so the row can say when to look",
+      [t["received"] for t in d["todos"] if t["id"] == "old1"]
+      == ["2026-10-01 08:14"], d["todos"])
 check("nothing is pending before the user clicks",
       not any(n["pending"] for n in d["notices"]), d["notices"])
 check("todos still sort by parsed deadline, not lexicographically",
@@ -165,7 +169,7 @@ write(tg.ARCHIVE_PATH, {"archived": [
     {"id": "fresh", "subject": "just archived", "archivedAt": NOW},
     {"id": "aging", "subject": "two and a half days", "action": "was a todo",
      "from": "reg@school.edu", "mailbox": "me@school.edu",
-     "archivedAt": NOW - int(2.5 * DAY)},
+     "received": "2026-10-01 08:14", "archivedAt": NOW - int(2.5 * DAY)},
     {"id": "expired", "subject": "past the window", "archivedAt": NOW - 4 * DAY},
     {"id": "nostamp", "subject": "written before stamps existed"},
     {"subject": "no id at all", "archivedAt": NOW},
@@ -178,9 +182,9 @@ check("an over-age entry clamps at zero, never negative", left["expired"] == 0, 
 check("an unstamped entry shows the full window, not an imminent purge",
       left["nostamp"] == 3,
       "the state machine stamps it on its next run, so it has not started aging")
-check("an archived row keeps both source fields, the same as a live one",
-      [(r["sender"], r["mailbox"]) for r in a if r["id"] == "aging"]
-      == [("reg@school.edu", "me@school.edu")], a)
+check("an archived row keeps every source field, the same as a live one",
+      [(r["sender"], r["mailbox"], r["received"]) for r in a if r["id"] == "aging"]
+      == [("reg@school.edu", "me@school.edu", "2026-10-01 08:14")], a)
 check("soonest to purge sorts first", [r["id"] for r in a][0] == "expired",
       [r["id"] for r in a])
 check("an id-less entry is served but marked unrestorable",
