@@ -68,11 +68,13 @@ DAY = 86400
 write(tg.STATE_PATH, {
     "roundSeq": 12,
     "todos": [{"id": "old1", "subject": "older todo", "createdRound": 11,
+               "from": "reg@school.edu", "mailbox": "me@school.edu",
                "action": "do the thing", "deadline": "2026-10-02"},
               {"id": "new1", "subject": "newer todo", "createdRound": 12,
                "deadline": "2026-09-15", "uncertain": True}],
     "notices": [{"id": "nt1", "subject": "recruiter reply", "from": "a@b.c",
-                 "summary": "reply by Friday", "noticedRound": 12},
+                 "mailbox": "scout", "summary": "reply by Friday",
+                 "noticedRound": 12},
                 {"id": "nt2", "summary": "album shared", "noticedRound": 12}],
 })
 d = cli.get("/api/todos").get_json()
@@ -84,6 +86,14 @@ check("a notice with no subject falls back to its summary",
       d["notices"][1]["subject"] == "album shared", d["notices"][1])
 check("the sender is carried through for the row's meta line",
       d["notices"][0]["sender"] == "a@b.c", d["notices"][0])
+check("the delivering mailbox rides along, so the row can say where to look",
+      d["notices"][0]["mailbox"] == "scout", d["notices"][0])
+check("a todo carries its mailbox too",
+      [t["mailbox"] for t in d["todos"] if t["id"] == "old1"] == ["me@school.edu"],
+      d["todos"])
+check("a todo stored before the field existed serves an empty one, not a KeyError",
+      [t["mailbox"] for t in d["todos"] if t["id"] == "new1"] == [""],
+      d["todos"])
 check("nothing is pending before the user clicks",
       not any(n["pending"] for n in d["notices"]), d["notices"])
 check("todos still sort by parsed deadline, not lexicographically",
@@ -154,6 +164,7 @@ check("ticking with no id is a bad request", r.status_code == 400, r.status_code
 write(tg.ARCHIVE_PATH, {"archived": [
     {"id": "fresh", "subject": "just archived", "archivedAt": NOW},
     {"id": "aging", "subject": "two and a half days", "action": "was a todo",
+     "from": "reg@school.edu", "mailbox": "me@school.edu",
      "archivedAt": NOW - int(2.5 * DAY)},
     {"id": "expired", "subject": "past the window", "archivedAt": NOW - 4 * DAY},
     {"id": "nostamp", "subject": "written before stamps existed"},
@@ -167,6 +178,9 @@ check("an over-age entry clamps at zero, never negative", left["expired"] == 0, 
 check("an unstamped entry shows the full window, not an imminent purge",
       left["nostamp"] == 3,
       "the state machine stamps it on its next run, so it has not started aging")
+check("an archived row keeps both source fields, the same as a live one",
+      [(r["sender"], r["mailbox"]) for r in a if r["id"] == "aging"]
+      == [("reg@school.edu", "me@school.edu")], a)
 check("soonest to purge sorts first", [r["id"] for r in a][0] == "expired",
       [r["id"] for r in a])
 check("an id-less entry is served but marked unrestorable",
@@ -238,6 +252,8 @@ check("it sits above the new-todo section", page.index("重要事項") < page.in
 check("it starts hidden, so an empty one does not flash on load",
       'class="sec hidden" id=secnotice' in page)
 check("the promote button posts to the promote endpoint", "'/api/promote'" in page)
+check("every row kind renders the source line through one function",
+      page.count("appendSource(") == 4, page.count("appendSource("))
 # Caught by looking at the rendered page: the subject falls back to the summary,
 # so a notice with no subject printed the same line twice.
 check("a summary equal to the subject is not printed twice",

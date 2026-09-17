@@ -289,6 +289,8 @@ def api_archive():
             "id": aid or "",
             "restorable": aid is not None,
             "subject": a.get("subject") or "(no subject)",
+            "sender": a.get("from") or "",
+            "mailbox": a.get("mailbox") or "",
             "action": a.get("action") or "",
             "deadline": a.get("deadline") or "",
             "daysLeft": max(0, left),
@@ -374,6 +376,7 @@ def api_todos():
             "tickable": tid is not None,
             "subject": t.get("subject") or "(no subject)",
             "sender": t.get("from") or "",
+            "mailbox": t.get("mailbox") or "",
             "action": t.get("action") or "",
             "deadline": t.get("deadline") or "",
             "uncertain": bool(t.get("uncertain")),
@@ -391,6 +394,7 @@ def api_todos():
         "promotable": _usable_id(n) is not None,
         "subject": n.get("subject") or n.get("summary") or "(no subject)",
         "sender": n.get("from") or "",
+        "mailbox": n.get("mailbox") or "",
         "summary": n.get("summary") or n.get("action") or "",
         "pending": _usable_id(n) is not None and _usable_id(n) in promoting,
     } for n in notices]
@@ -454,6 +458,7 @@ PAGE = """<!doctype html>
  .act{color:#c9cdd3;font-size:14px;overflow-wrap:anywhere}
  .meta{color:#8b9096;font-size:12px;margin-top:5px}
  .due{color:#ffb26b;font-weight:600}
+ .box{color:#9fb8cc}
  .flag{color:#7fb2ff;font-weight:600}
  .st{font-size:11px;min-width:52px;text-align:right;padding-top:3px;flex:none}
  .saving{color:#8b9096}.saved{color:#6bd68a}.failed{color:#ff7a7a;font-weight:600}
@@ -571,6 +576,19 @@ function fillNotices(items){
   for(const n of items) list.append(noticeRow(n));
 }
 
+// scout is a forwarding hub, so sender alone doesn't name the account with
+// the original -- showing mailbox alongside it does. Returns whether
+// anything was written.
+function appendSource(meta, item){
+  if(item.sender) meta.append(document.createTextNode(item.sender));
+  if(item.mailbox){
+    const b = el('span','box');
+    b.textContent = (item.sender ? '  ' : '') + '收件 ' + item.mailbox;
+    meta.append(b);
+  }
+  return meta.childNodes.length > 0;
+}
+
 function noticeRow(n){
   const r = el('div','row note');
   const body = el('div','body');
@@ -579,7 +597,8 @@ function noticeRow(n){
   // rendering the summary again would print the same line twice.
   if(n.summary && n.summary !== n.subject)
     body.append(Object.assign(el('div','act'),{textContent:n.summary}));
-  if(n.sender) body.append(Object.assign(el('div','meta'),{textContent:n.sender}));
+  const nmeta = el('div','meta');
+  if(appendSource(nmeta, n)) body.append(nmeta);
   const btn = el('button','btn');
   btn.textContent = n.pending ? '已排定加入' : '加到待辦';
   btn.disabled = n.pending || !n.promotable;
@@ -608,6 +627,8 @@ function archRow(a){
   const body = el('div','body');
   body.append(Object.assign(el('div','subj'),{textContent:a.subject}));
   if(a.action) body.append(Object.assign(el('div','act'),{textContent:a.action}));
+  const ameta = el('div','meta');
+  if(appendSource(ameta, a)) body.append(ameta);
   const left = el('div', 'left' + (a.daysLeft <= 1 ? ' soon' : ''));
   left.textContent = a.daysLeft <= 0 ? '即將清除' : `剩 ${a.daysLeft} 天`;
   const btn = el('button','btn');
@@ -658,7 +679,7 @@ function row(t){
                    meta.append(u, document.createTextNode('  ')); }
   if(!t.tickable){ const n=el('span','flag'); n.textContent='缺 id 無法勾選';
                    meta.append(n, document.createTextNode('  ')); }
-  if(t.sender) meta.append(document.createTextNode(t.sender));
+  appendSource(meta, t);
   body.append(meta);
   const st = el('div','st');
   r.append(cb, body, st);
