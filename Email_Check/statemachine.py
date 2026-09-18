@@ -118,13 +118,10 @@ def read_config() -> dict[str, Any]:
             "names": count, "calendarUrls": good}
 
 
-def excluded_senders() -> list[str]:
-    """Addresses every search strips out, read from config.json.
+def _config_list(key: str) -> list[str]:
+    """One list of strings from config.json, blanks and non-strings dropped.
 
-    Lives in the gitignored config rather than in this file so that a real
-    mailbox address stays off the public remote.
-
-    An unreadable config yields no exclusion, which widens the search instead
+    An unreadable config yields no entries, which widens the search instead
     of narrowing it. The opposite default would silently drop mail for as long
     as the config stayed broken, and read_config already alerts on the fault.
 
@@ -139,10 +136,33 @@ def excluded_senders() -> list[str]:
         return []
     if not isinstance(data, dict):
         return []
-    raw = data.get("excludedSenders") or []
+    raw = data.get(key) or []
     if not isinstance(raw, list):
         return []
     return [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+
+
+def excluded_senders() -> list[str]:
+    """Addresses every search strips out, read from config.json.
+
+    Lives in the gitignored config rather than in this file so that a real
+    mailbox address stays off the public remote.
+    """
+    return _config_list("excludedSenders")
+
+
+def excluded_labels() -> list[str]:
+    """Gmail labels every search strips out, read from config.json.
+
+    These are the user's own hand-applied tags, so re-judging one every round
+    only spends tokens re-deriving a decision the user already made.
+
+    Stronger than a sender exclusion: a sender exclusion covers a source that
+    never carries anything actionable, while a label can sit on one message
+    from a source whose other mail still matters. That is why the tag has to
+    come from the user rather than be inferred here.
+    """
+    return _config_list("excludedLabels")
 
 
 def _usable_id(item: dict) -> str | None:
@@ -960,7 +980,7 @@ class Progress:
 
 
 def build_query(lo: int, hi: int) -> str:
-    """The interval bounds verbatim, plus the configured sender exclusions.
+    """The interval bounds verbatim, plus the configured exclusions.
 
     The clock-skew overlap is applied once when the tail interval is created,
     not here. Re-widening every sub-query by BOUNDARY_SLACK meant a bisected
@@ -970,11 +990,15 @@ def build_query(lo: int, hi: int) -> str:
     actually being queried.
 
     Exclusions widen the result set when absent, so a broken config costs
-    tokens rather than coverage. See excluded_senders.
+    tokens rather than coverage. See excluded_senders and excluded_labels.
     """
     q = f"after:{max(0, lo)} before:{hi}"
     for addr in excluded_senders():
         q += f" -from:{addr}"
+    for label in excluded_labels():
+        # An unquoted space would close the operator and leave the remainder
+        # as a free-text term, narrowing the search instead of widening it.
+        q += f' -label:"{label}"' if " " in label else f" -label:{label}"
     return q
 
 

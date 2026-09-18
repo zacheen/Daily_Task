@@ -551,6 +551,32 @@ with open(sm.CONFIG_PATH, "w", encoding="utf-8") as fh:
     fh.write("{ not json")
 q_bad = sm.build_query(2000, 2001)
 check("a malformed config excludes nobody", q_bad == "after:2000 before:2001", q_bad)
+
+# --- label exclusions honour the tags the user applied in Gmail ---
+# A tagged message is one the user has already decided about, so fetching it
+# again every round only re-derives an answer that exists. Same safe default
+# as the sender list: no config means no exclusion.
+with open(sm.CONFIG_PATH, "w", encoding="utf-8") as fh:
+    json.dump({"excludedLabels": ["ignore", "  ", 7, "old stuff"]}, fh)
+q_lab = sm.build_query(2000, 2001)
+check("every configured label is excluded, blanks and non-strings dropped",
+      q_lab == 'after:2000 before:2001 -label:ignore -label:"old stuff"', q_lab)
+
+# A multi-word label must be quoted. Unquoted, Gmail would end the operator at
+# the space and read the remainder as a free-text term, which narrows the
+# search rather than widening it, so the failure would hide mail.
+check("a multi-word label is quoted", '-label:"old stuff"' in q_lab, q_lab)
+
+with open(sm.CONFIG_PATH, "w", encoding="utf-8") as fh:
+    json.dump({"excludedSenders": ["a@x.com"], "excludedLabels": ["ignore"]}, fh)
+q_both = sm.build_query(2000, 2001)
+check("senders and labels are both applied",
+      q_both == "after:2000 before:2001 -from:a@x.com -label:ignore", q_both)
+
+with open(sm.CONFIG_PATH, "w", encoding="utf-8") as fh:
+    fh.write("{ not json")
+check("a malformed config excludes no label",
+      sm.build_query(2000, 2001) == "after:2000 before:2001", sm.build_query(2000, 2001))
 os.unlink(sm.CONFIG_PATH)
 
 cov = sm.Coverage(5000, [])
