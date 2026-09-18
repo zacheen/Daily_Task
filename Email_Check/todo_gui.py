@@ -589,7 +589,13 @@ function appendSource(meta, item){
   if(item.sender) meta.append(document.createTextNode(item.sender));
   if(item.mailbox){
     const b = el('span','box');
-    b.textContent = (item.sender ? '  ' : '') + '收件 ' + item.mailbox;
+    // No @ means the account alias, which is what gets stored for mail
+    // nobody forwarded. Left bare, it reads like a value that failed to
+    // resolve, which is exactly what it looked like while it was one.
+    const direct = !item.mailbox.includes('@');
+    b.textContent = (item.sender ? '  ' : '') + '收件 ' + item.mailbox
+                  + (direct ? ' 直收' : '');
+    if(direct) b.title = '信直接寄到轉信中心，沒有經過其他信箱，原信只在這個帳號裡';
     meta.append(b);
   }
   return meta.childNodes.length > 0;

@@ -98,6 +98,8 @@ check("a todo stored before the field existed serves an empty one, not a KeyErro
 check("the received stamp rides along too, so the row can say when to look",
       [t["received"] for t in d["todos"] if t["id"] == "old1"]
       == ["2026-10-01 08:14"], d["todos"])
+check("the mailbox is served as stored, alias and all, for the page to label",
+      d["notices"][0]["mailbox"] == "scout", d["notices"][0])
 check("nothing is pending before the user clicks",
       not any(n["pending"] for n in d["notices"]), d["notices"])
 check("todos still sort by parsed deadline, not lexicographically",
@@ -256,6 +258,8 @@ check("it sits above the new-todo section", page.index("重要事項") < page.in
 check("it starts hidden, so an empty one does not flash on load",
       'class="sec hidden" id=secnotice' in page)
 check("the promote button posts to the promote endpoint", "'/api/promote'" in page)
+check("an alias mailbox is labelled rather than left looking unresolved",
+      "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",
       page.count("appendSource(") == 4, page.count("appendSource("))
 # Caught by looking at the rendered page: the subject falls back to the summary,
