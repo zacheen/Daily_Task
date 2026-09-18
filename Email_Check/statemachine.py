@@ -66,9 +66,9 @@ ARCHIVE_TTL = 3 * 86400
 # Stands in for a rev that could not be read. Never equal to a real rev, so a
 # compare-and-swap against it always refuses the write.
 UNREADABLE_REV = "__unreadable__"
-# Local-clock window in which a round may open the todo list. The 06:00
+# Local-clock window in which a round may open the todo list. The 06:25
 # round would otherwise pop a browser window while the user is asleep.
-# End is exclusive; 23 still lets the 21:30 round through.
+# End is exclusive; 23 still lets the 22:10 round through.
 GUI_OPEN_HOURS = (9, 23)
 
 
@@ -1261,7 +1261,7 @@ def cmd_commit(_args) -> int:
           "newTodosThisRound": new_todos,
           # Both halves are decided here rather than left to the round's own
           # arithmetic, so a cold reader cannot get the quiet-hours window
-          # wrong and pop a browser at 06:00.
+          # wrong and pop a browser at 06:25.
           "shouldOpenTodoList": (new_todos > 0 or notice["newNotices"] > 0)
           and within_gui_hours(time.localtime(now).tm_hour, GUI_OPEN_HOURS),
           "notices": len(state.notices),

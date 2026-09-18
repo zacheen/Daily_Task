@@ -778,15 +778,15 @@ sm.emit = prior_emit
 
 # --- the todo list only opens when there is something new AND it is not night ---
 # The window lives here rather than in the round's own arithmetic, because the
-# 06:00 task would otherwise pop a browser window while the user is asleep.
+# 06:25 task would otherwise pop a browser window while the user is asleep.
 real_hours = sm.GUI_OPEN_HOURS
 DAY = sm.GUI_OPEN_HOURS
 check("the window start is inclusive", sm.within_gui_hours(9, DAY))
 check("the window end is exclusive", not sm.within_gui_hours(23, DAY),
-      "23 must still admit the 21:30 round, and exclude midnight")
-check("the 06:00 round is outside the window", not sm.within_gui_hours(6, DAY))
-check("the 11:10, 16:20 and 21:30 rounds are inside",
-      all(sm.within_gui_hours(h, DAY) for h in (11, 16, 21)))
+      "23 must still admit the 22:10 round, and exclude midnight")
+check("the 06:25 round is outside the window", not sm.within_gui_hours(6, DAY))
+check("the 11:40, 16:55 and 22:10 rounds are inside",
+      all(sm.within_gui_hours(h, DAY) for h in (11, 16, 22)))
 check("a window crossing midnight narrows instead of matching nothing",
       sm.within_gui_hours(23, (22, 6)) and sm.within_gui_hours(3, (22, 6))
       and not sm.within_gui_hours(12, (22, 6)))
