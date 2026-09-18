@@ -40,10 +40,12 @@ PROGRESS_PATH = os.path.join(HERE, "round-progress.json")
 # cross-process lock is needed. Each one is a verb the user aimed at a row:
 # ticked means done, restore means un-archive, promote means the notified mail
 # in the GUI's 重要事項 section is really a todo. All three are read here.
-CHECKED_PATH = os.path.join(HERE, "todos-checked.json")
-ARCHIVE_PATH = os.path.join(HERE, "todos-archive.json")
-RESTORE_PATH = os.path.join(HERE, "todos-restore.json")
-PROMOTE_PATH = os.path.join(HERE, "todos-promote.json")
+# All four files now live in task_list/, alongside the viewer.
+TASK_LIST_DIR = os.path.join(HERE, "task_list")
+CHECKED_PATH = os.path.join(TASK_LIST_DIR, "tasks-checked.json")
+ARCHIVE_PATH = os.path.join(TASK_LIST_DIR, "tasks-archive.json")
+RESTORE_PATH = os.path.join(TASK_LIST_DIR, "tasks-restore.json")
+PROMOTE_PATH = os.path.join(TASK_LIST_DIR, "tasks-promote.json")
 CONFIG_PATH = os.path.join(HERE, "config.json")
 
 MAX_RESULTS = 40
@@ -347,7 +349,10 @@ def _atomic_json(path: str, payload: Any) -> None:
     what lets the GUI read state.json with no lock, and what stops a
     half-written state.json from reading as corrupt and halting the task.
     """
-    fd, tmp = tempfile.mkstemp(dir=HERE, prefix=".sm.", suffix=".tmp")
+    # Beside the target rather than in HERE, because the archive now lives in
+    # task_list/ and os.replace is only atomic within one volume.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".sm.",
+                               suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -590,7 +595,7 @@ class State:
         so a message resurfacing from a park queue cannot undo a completion.
 
         Nothing writes those fields today. Tick state lives only in
-        todos-checked.json and consume_checked never stamps them back, so this
+        tasks-checked.json and consume_checked never stamps them back, so this
         is a guard for a field that does not yet exist rather than live logic.
         It stays because the invariant it protects is the expensive one, and
         because any future writer would otherwise silently lose it.

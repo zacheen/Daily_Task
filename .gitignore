@@ -19,17 +19,17 @@ Email_Check/round-progress.json
 Email_Check/config.json
 Email_Check/__pycache__/
 
-# Todo list runtime data. Contains real mail subjects and senders.
-Email_Check/todos-checked.json
-Email_Check/todos-archive.json
-Email_Check/.gui.*.tmp
+# Task list runtime data: the archive the state machine writes, plus the
+# checked / restore / promote requests the viewer writes for it to consume.
+# All of it carries real mail subjects and senders. Matched by extension
+# rather than by name so that a request file added later cannot leak by being
+# forgotten here; task_list_gui.py is the only tracked file in that folder.
+Email_Check/task_list/*.json
+Email_Check/task_list/.gui.*.tmp
+Email_Check/task_list/.sm.*.tmp
 
 # Calendar feed cache. Derived, and holds real event titles.
 Email_Check/calendar-cache.json
-
-# GUI-owned requests. Consumed by the state machine each round.
-Email_Check/todos-restore.json
-Email_Check/todos-promote.json
 
 # Task folders that work with personal data. Excluded wholesale rather than by
 # subpath, because a single stray file is enough to leak. Each is versioned in

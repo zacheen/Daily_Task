@@ -1,6 +1,6 @@
 """Does the todo GUI really exit when no page is open?
 
-test_todo_gui.py covers `exit_reason` as a pure function, proving the policy
+test_task_list_gui.py covers `exit_reason` as a pure function, proving the policy
 but not that the watchdog thread ever acts on it. That gap matters more here:
 an unattended scheduled run starts this server, so a watchdog that never fires
 leaves a resident process nobody closes, defeating the whole reason the task
@@ -19,7 +19,7 @@ outright (an automated tab close, a crash) runs no unload handler and so sends
 no beacon; that is precisely the case CLIENT_TIMEOUT backstops, measured to
 fire exactly 150s after the last touch.
 
-    conda run -n ML python test_todo_gui_exit.py
+    conda run -n ML python test_task_list_gui_exit.py
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ import tempfile
 import time
 import urllib.request
 
-# One level up, because the tests live in test/ and the code does not.
+# Email_Check/, one level up from test/. The viewer sits under task_list/.
 CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(CODE, "todo_gui.py")
+SRC = os.path.join(CODE, "task_list", "task_list_gui.py")
 WORK = tempfile.mkdtemp(prefix="guiexit.")
 # sys.executable, so this uses whichever interpreter ran the test rather than
 # hunting for the conda env by path.

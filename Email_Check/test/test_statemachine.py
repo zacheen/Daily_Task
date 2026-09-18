@@ -203,8 +203,13 @@ check("blank re-defer keeps the other fields",
       a11.get("from") == "a@b.com" and a11.get("snippet") == "hi", a11)
 
 # --- todo queue: upsert by id, user completion is never overwritten ---
-sm.CHECKED_PATH = os.path.join(work, "todos-checked.json")
-sm.ARCHIVE_PATH = os.path.join(work, "todos-archive.json")
+sm.CHECKED_PATH = os.path.join(work, "tasks-checked.json")
+sm.ARCHIVE_PATH = os.path.join(work, "tasks-archive.json")
+# Every request path must be rebound, not just the two above. PROMOTE_PATH
+# was missed until task_list/ made the write fail; before then, the promote
+# case below quietly wrote a real request file the next scheduled round
+# would have consumed.
+sm.PROMOTE_PATH = os.path.join(work, "tasks-promote.json")
 
 st12 = sm.State({"horizon": 100, "roundSeq": 6})
 st12.reconcile_todos([{"id": "t1", "subject": "OA link", "action": "do the OA"}], set())
@@ -469,7 +474,7 @@ for _p, _snap in ((sm.ARCHIVE_PATH, _snap_arch), (sm.CHECKED_PATH, _snap_tick)):
 
 
 def archived_ids():
-    """Ids in todos-archive.json. Other cases above already put rows here, so
+    """Ids in tasks-archive.json. Other cases above already put rows here, so
     these checks count one id rather than compare the whole list."""
     with open(sm.ARCHIVE_PATH, encoding="utf-8") as fh:
         return [t["id"] for t in json.load(fh)["archived"]]
@@ -976,7 +981,7 @@ def _read_arch():
 
 
 # --- restore from the archive, and the three-day purge ---
-sm.RESTORE_PATH = os.path.join(work, "todos-restore.json")
+sm.RESTORE_PATH = os.path.join(work, "tasks-restore.json")
 NOW = 1789000000
 
 

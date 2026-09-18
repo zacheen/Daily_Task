@@ -10,9 +10,9 @@ import importlib.util
 import os
 import sys
 
-# One level up, because the tests live in test/ and the code does not.
+# Email_Check/, one level up from test/. The viewer sits under task_list/.
 CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(CODE, "todo_gui.py")
+SRC = os.path.join(CODE, "task_list", "task_list_gui.py")
 spec = importlib.util.spec_from_file_location("tg", SRC)
 tg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tg)

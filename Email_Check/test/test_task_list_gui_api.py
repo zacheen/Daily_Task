@@ -1,6 +1,6 @@
 """HTTP tests for the GUI's request endpoints, against a temp data directory.
 
-test_todo_gui.py only covers the pure helpers, so /api/archive and /api/restore
+test_task_list_gui.py only covers the pure helpers, so /api/archive and /api/restore
 had no net at all. That is exactly where two comments drifted out of date
 through three review rounds, because nowhere else could an assertion fail. The
 promote endpoint behind the notice section arrives with one from the start.
@@ -17,9 +17,9 @@ import sys
 import tempfile
 import time
 
-# One level up, because the tests live in test/ and the code does not.
+# Email_Check/, one level up from test/. The viewer sits under task_list/.
 CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(CODE, "todo_gui.py")
+SRC = os.path.join(CODE, "task_list", "task_list_gui.py")
 spec = importlib.util.spec_from_file_location("tg", SRC)
 tg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tg)
@@ -29,10 +29,10 @@ work = tempfile.mkdtemp(prefix="guiapi.")
 # target, so leaving it pointed at the project would litter the real directory.
 tg.HERE = work
 tg.STATE_PATH = os.path.join(work, "state.json")
-tg.CHECKED_PATH = os.path.join(work, "todos-checked.json")
-tg.ARCHIVE_PATH = os.path.join(work, "todos-archive.json")
-tg.RESTORE_PATH = os.path.join(work, "todos-restore.json")
-tg.PROMOTE_PATH = os.path.join(work, "todos-promote.json")
+tg.CHECKED_PATH = os.path.join(work, "tasks-checked.json")
+tg.ARCHIVE_PATH = os.path.join(work, "tasks-archive.json")
+tg.RESTORE_PATH = os.path.join(work, "tasks-restore.json")
+tg.PROMOTE_PATH = os.path.join(work, "tasks-promote.json")
 tg.app.config["TESTING"] = True
 cli = tg.app.test_client()
 

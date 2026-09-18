@@ -64,7 +64,7 @@ allowlist 是逐字比對的，**不在上面的命令會停在權限提示，�
 | `statemachine.py` 的 `begin` / `step` / `commit` | 第 1、3、6 步 |
 | `calendar_check.py` | 第 4 步 |
 | `notify.ps1` | 第 5 步 |
-| `open-todo-gui.ps1` | 第 7 步 |
+| `open-task-list.ps1` | 第 7 步 |
 
 **不要為了省 token 自己拼一行命令去翻檔案。** 這是真的發生過的故障。
 有一輪讀完內文、正要寫 `round.json` 之前，跑了一行
@@ -110,7 +110,7 @@ Qualification 任務每天寫 `Qualification/reports/` 與 `Qualification/baseli
 **deny 也要一起鏡射。** 只鏡射 allow 的話，使用者層的 `Edit(...Email_Check\**)`
 會允許編輯那三個請求檔，而擋住它們的 deny 只在專案檔裡，等於憑白放寬。
 
-寫規則進 JSON 時小心反斜線。`"...Email_Check\todos-restore.json"` 在 Python 字串裡
+寫規則進 JSON 時小心反斜線。`"...task_list\tasks-restore.json"` 在 Python 字串裡
 `\t` 就是一個 tab，`json.dumps` 會忠實地把它寫成 `\\t` 轉義，規則於是壞掉，
 而且在檔案裡看不出來。反斜線一律用 `chr(92)` 組出來。
 
@@ -123,7 +123,7 @@ Qualification 任務每天寫 `Qualification/reports/` 與 `Qualification/baseli
 | `mcp__gmail__search_emails` | 抓信 |
 | `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1"*)` | 本機 toast 通知，現行形式 |
 | `PowerShell(& "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" *)` | 舊形式，已無呼叫端，保留備查 |
-| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-todo-gui.ps1"*)` | 開待辦清單，現行形式 |
+| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"*)` | 開待辦清單，現行形式 |
 | `mcp__gmail__get_email_body` | 讀內文 |
 | `Read(Email_Check/**)` 與絕對路徑版 | 讀這個檔案與 config.json |
 | `Edit(Email_Check/**)` 與絕對路徑版 | 寫 round.json |
@@ -767,7 +767,7 @@ token 不符會被當成讀取失敗而保留區間，那是安全方向；漏�
 ### 7. 有新待辦才開待辦清單
 
 `commit` 回傳 `shouldOpenTodoList` 為 `true` 時，跑「待辦清單的圖形介面」那一節的
-`open-todo-gui.ps1` 命令。是 `false` 就**不要開**，不要自己重算條件。
+`open-task-list.ps1` 命令。是 `false` 就**不要開**，不要自己重算條件。
 
 腳本已經把兩個條件都算進去了，這輪有沒有新待辦**或新的重要事項**，
 以及現在是不是在 `GUI_OPEN_HOURS`（預設 09:00–23:00）之內。
@@ -830,7 +830,7 @@ token 不符會被當成讀取失敗而保留區間，那是安全方向；漏�
 使用者要看或勾選待辦時，自己跑
 
 ```
-conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\todo_gui.py"
+conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\task_list\task_list_gui.py"
 ```
 
 會開一個只綁 127.0.0.1 的 Flask 伺服器並自動開瀏覽器，看完關掉即可。
@@ -840,10 +840,10 @@ conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\todo_gui.py
 排程任務要啟動它時**只能用這個形式，字串固定不要改寫**。用 Bash 工具跑。
 
 ```
-powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-todo-gui.ps1"
+powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"
 ```
 
-`pythonw.exe` 與 `Start-Process` 那兩件事都搬進 `shared/open-todo-gui.ps1` 裡了，
+`pythonw.exe` 與 `Start-Process` 那兩件事都搬進 `shared/open-task-list.ps1` 裡了，
 連同不開主控台視窗、以及讓伺服器脫離這一輪 session 獨立存活的理由。
 解譯器路徑在腳本裡用 `$env:USERPROFILE` 組出來，所以這份文件不含本機使用者名稱。
 
@@ -882,10 +882,10 @@ powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-to
 
 寫入者分工是這套設計的核心，不要打破
 - `state.json` 只有 statemachine 寫，GUI 只讀
-- `todos-archive.json` 只有 statemachine 寫，GUI 只讀
-- `todos-checked.json`（勾選完成）只有 GUI 寫，statemachine 只讀
-- `todos-restore.json`（從已封存復原）只有 GUI 寫，statemachine 只讀
-- `todos-promote.json`（重要事項升成待辦）只有 GUI 寫，statemachine 只讀
+- `tasks-archive.json` 只有 statemachine 寫，GUI 只讀
+- `tasks-checked.json`（勾選完成）只有 GUI 寫，statemachine 只讀
+- `tasks-restore.json`（從已封存復原）只有 GUI 寫，statemachine 只讀
+- `tasks-promote.json`（重要事項升成待辦）只有 GUI 寫，statemachine 只讀
 
 後面三個是使用者對某一列下的指令。**這三個檔案你一律不准寫。**
 它們代表的是「使用者說做完了」、「使用者說拉回來」、「使用者說這是待辦」，

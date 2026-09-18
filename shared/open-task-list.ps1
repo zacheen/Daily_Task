@@ -1,5 +1,5 @@
 <#
-Launches the todo list GUI detached from the round that calls it.
+Launches the task list GUI detached from the round that calls it.
 
 Exists so the documented command carries no local username. The interpreter
 path is resolved from $env:USERPROFILE here rather than spelled out in
@@ -20,13 +20,13 @@ Deliberately ASCII-only: notify.ps1 must stay UTF-8 with BOM (Windows
 PowerShell 5.1 decodes a BOM-less .ps1 as system ANSI, mangling its Chinese
 default), so staying pure ASCII here means there is no BOM to lose.
 
-Port 8765 already being in use needs no handling here. todo_gui.py exits on
+Port 8765 already being in use needs no handling here. task_list_gui.py exits on
 its own in that case, because it means the user already has the page open.
 #>
 $ErrorActionPreference = "Stop"
 
 $python = Join-Path $env:USERPROFILE "miniconda3\envs\ML\pythonw.exe"
-$script = "D:\dont_move\git_save\Daily_Task\Email_Check\todo_gui.py"
+$script = "D:\dont_move\git_save\Daily_Task\Email_Check\task_list\task_list_gui.py"
 
 # Reported rather than thrown: the caller is told to ignore this script's
 # output entirely, so a missing path is only ever read by a human running it
@@ -42,4 +42,4 @@ if (-not (Test-Path $script)) {
 }
 
 Start-Process -FilePath $python -ArgumentList $script -WindowStyle Hidden
-Write-Output "Todo GUI launched."
+Write-Output "Task list GUI launched."

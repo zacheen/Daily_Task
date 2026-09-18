@@ -3,7 +3,7 @@
 ## 改完程式要跑的測試
 
 `Email_Check/test/` 底下五個檔，直接跑檔案本身，不需要 pytest，全部跑完約 36 秒。
-改了 `statemachine.py`、`todo_gui.py` 或 `calendar_check.py` 就跑對應的那一個。
+改了 `statemachine.py`、`task_list/task_list_gui.py` 或 `calendar_check.py` 就跑對應的那一個。
 
 ```
 conda run -n ML --no-capture-output python "D:\dont_move\git_save\Daily_Task\Email_Check\test\test_statemachine.py"

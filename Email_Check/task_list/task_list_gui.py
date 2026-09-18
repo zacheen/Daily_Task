@@ -25,7 +25,7 @@ because a stale tab against a stopped server otherwise looks identical to a
 successful save.
 
 Run with
-    conda run -n ML python "D:\\dont_move\\git_save\\Daily_Task\\Email_Check\\todo_gui.py"
+    conda run -n ML python "D:\\dont_move\\git_save\\Daily_Task\\Email_Check\\task_list\\task_list_gui.py"
 """
 
 from __future__ import annotations
@@ -42,11 +42,14 @@ import webbrowser
 from flask import Flask, jsonify, request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_PATH = os.path.join(HERE, "state.json")
-CHECKED_PATH = os.path.join(HERE, "todos-checked.json")
-ARCHIVE_PATH = os.path.join(HERE, "todos-archive.json")
-RESTORE_PATH = os.path.join(HERE, "todos-restore.json")
-PROMOTE_PATH = os.path.join(HERE, "todos-promote.json")
+# state.json lives one level up because statemachine.py owns it and the rest of
+# the Email_Check task reads it too. Only the four files below are this
+# folder's, which is also where _atomic_write puts its temp file.
+STATE_PATH = os.path.join(os.path.dirname(HERE), "state.json")
+CHECKED_PATH = os.path.join(HERE, "tasks-checked.json")
+ARCHIVE_PATH = os.path.join(HERE, "tasks-archive.json")
+RESTORE_PATH = os.path.join(HERE, "tasks-restore.json")
+PROMOTE_PATH = os.path.join(HERE, "tasks-promote.json")
 # Mirrors ARCHIVE_TTL in statemachine.py, for showing days remaining.
 ARCHIVE_TTL_DAYS = 3
 HOST, PORT = "127.0.0.1", 8765
@@ -524,7 +527,7 @@ async function load(){
   let d;
   try{ d = await (await fetch('/api/todos?cid='+CID)).json(); }
   catch(e){ document.getElementById('sub').textContent =
-      '讀不到資料，伺服器已經關閉。重新啟動 todo_gui.py'; return; }
+      '讀不到資料，伺服器已經關閉。重新啟動 task_list_gui.py'; return; }
   const open = d.todos.filter(t=>!t.checked).length;
   document.getElementById('sub').textContent =
     d.todos.length ? `${open} 項待辦，${d.todos.length-open} 項已勾選待清理`
