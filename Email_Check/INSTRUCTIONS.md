@@ -17,7 +17,7 @@
 因為 Gmail 過濾的是 internalDate、而顯示的 Date 標頭落後它一段沒有上限的差值。
 
 要改**判斷標準**，改這個檔案。
-要改**時間窗或狀態邏輯**，改 `statemachine.py`，並跑 `test_statemachine.py`。
+要改**時間窗或狀態邏輯**，改 `statemachine.py`，並跑 `test/test_statemachine.py`。
 
 ## 目標
 檢查 Gmail 帳號 `scout` 自上次檢查以來的新信，判斷有沒有重要的信。

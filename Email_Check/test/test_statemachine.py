@@ -1,7 +1,9 @@
 """End-to-end scenario tests for the state machine, run against a temp copy."""
 import importlib.util, json, os, shutil, sys, tempfile
 
-SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "statemachine.py")
+# One level up, because the tests live in test/ and the code does not.
+CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(CODE, "statemachine.py")
 work = tempfile.mkdtemp(prefix="smtest.")
 shutil.copy(SRC, os.path.join(work, "statemachine.py"))
 spec = importlib.util.spec_from_file_location("sm", os.path.join(work, "statemachine.py"))

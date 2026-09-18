@@ -32,8 +32,9 @@ import tempfile
 import time
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "todo_gui.py")
+# One level up, because the tests live in test/ and the code does not.
+CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(CODE, "todo_gui.py")
 WORK = tempfile.mkdtemp(prefix="guiexit.")
 # sys.executable, so this uses whichever interpreter ran the test rather than
 # hunting for the conda env by path.

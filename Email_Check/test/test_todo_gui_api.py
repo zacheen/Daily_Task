@@ -17,7 +17,9 @@ import sys
 import tempfile
 import time
 
-SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "todo_gui.py")
+# One level up, because the tests live in test/ and the code does not.
+CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(CODE, "todo_gui.py")
 spec = importlib.util.spec_from_file_location("tg", SRC)
 tg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tg)

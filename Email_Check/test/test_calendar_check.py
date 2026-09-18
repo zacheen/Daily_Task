@@ -7,7 +7,9 @@ import shutil
 import sys
 import tempfile
 
-SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calendar_check.py")
+# One level up, because the tests live in test/ and the code does not.
+CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(CODE, "calendar_check.py")
 WORK = tempfile.mkdtemp(prefix="cctest.")
 spec = importlib.util.spec_from_file_location("cc", SRC)
 cc = importlib.util.module_from_spec(spec)
