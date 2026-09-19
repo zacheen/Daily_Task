@@ -38,6 +38,12 @@ Email_Check/calendar-cache.json
 # `git add .` would otherwise sweep the whole folder in.
 Qualification/
 
+# Per-machine permission rules for the scheduled tasks. The allowlist has to
+# name the sites and the folders each task touches, which for the folders
+# excluded above would put back on the remote exactly what excluding them
+# keeps off it. Absolute paths in it are machine-specific anyway.
+.claude/settings.local.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
