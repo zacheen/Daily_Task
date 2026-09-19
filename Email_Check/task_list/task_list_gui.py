@@ -378,7 +378,10 @@ def api_todos():
         rows.append({
             "id": tid or "",
             "tickable": tid is not None,
-            "subject": t.get("subject") or "(no subject)",
+            # str(), because this is a sort key below and a non-string subject
+            # would raise TypeError against a string one. statemachine refuses
+            # such a todo at ingestion; this covers a hand-edited state.json.
+            "subject": str(t.get("subject") or "(no subject)"),
             "sender": t.get("from") or "",
             "mailbox": t.get("mailbox") or "",
             "received": t.get("received") or "",
@@ -743,6 +746,9 @@ def port_is_taken(host: str, port: int) -> bool:
     scheduled to open, or a second tab would open against a server this
     process will never own; the existing page already polls every 30s and
     picks up new todos on its own.
+
+    Occupancy only. Nothing here identifies the listener, so any other process
+    holding the port also stops this one, silently and with no todo list.
     """
     with socket.socket() as sock:
         sock.settimeout(1)
@@ -752,7 +758,8 @@ def port_is_taken(host: str, port: int) -> bool:
 if __name__ == "__main__":
     url = f"http://{HOST}:{PORT}/"
     if port_is_taken(HOST, PORT):
-        print("already open at " + url + ", nothing to do")
+        print("port " + str(PORT) + " is already in use, not starting. "
+              + "If the todo list is the listener it is at " + url)
         raise SystemExit(0)
     print("Gmail todo list at " + url)
     print("Closing the page exits this process. Ctrl+C also works.")

@@ -21,7 +21,9 @@ PowerShell 5.1 decodes a BOM-less .ps1 as system ANSI, mangling its Chinese
 default), so staying pure ASCII here means there is no BOM to lose.
 
 Port 8765 already being in use needs no handling here. task_list_gui.py exits on
-its own in that case, because it means the user already has the page open.
+its own in that case. It checks occupancy, not identity, so the usual cause is
+that the user already has the page open, but any other listener on 8765 stops
+the launch just the same.
 #>
 $ErrorActionPreference = "Stop"
 

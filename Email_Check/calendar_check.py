@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,9 @@ WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 # RRULE parts rrule_covers actually models. An unlisted part means the rule is
 # narrower than what it computes, so it refuses the event instead.
 RRULE_SUPPORTED = {"FREQ", "BYDAY", "UNTIL", "INTERVAL", "WKST"}
+# Marks an event served from an expired cache entry. In-memory only, never
+# written to the cache file, and read only by lookup.
+STALE_TAG = "_fromExpiredCache"
 _NOISE = re.compile(r"[^0-9a-z一-鿿]+")
 _STOP = {"the", "a", "an", "and", "or", "of", "for", "to", "your", "you",
          "invitation", "invite", "invited", "synced", "reminder", "workshop",
@@ -177,10 +181,23 @@ def load_urls() -> tuple[list[str], str]:
     return good, "" if good else "no usable calendarIcsUrls in config.json"
 
 
+def _cache_key(url: str) -> str:
+    """Cache slot for one feed.
+
+    Keyed by the URL, never by its position in calendarIcsUrls. Under the old
+    positional key, replacing or reordering the list kept serving the previous
+    calendar's events from the same slot until the entry aged out, which is a
+    FOUND for an event the user does not have.
+    """
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
 def fetch_all(urls: list[str]) -> tuple[list[dict], list[str]]:
     """Events from every feed, plus the URLs that failed.
 
     Cached briefly so several lookups in one round cost one request each feed.
+    Events served from an expired entry because the fetch failed carry
+    STALE_TAG; a fresh within-TTL hit is normal operation and carries nothing.
     """
     cache = {}
     if os.path.exists(CACHE_PATH):
@@ -194,8 +211,9 @@ def fetch_all(urls: list[str]) -> tuple[list[dict], list[str]]:
     events: list[dict] = []
     failed: list[str] = []
     dirty = False
-    for i, url in enumerate(urls):
-        key = str(i)
+    wanted = {_cache_key(u) for u in urls}
+    for url in urls:
+        key = _cache_key(url)
         hit = cache.get(key)
         if hit and now - hit.get("at", 0) < CACHE_TTL:
             events.extend(hit.get("events", []))
@@ -210,16 +228,24 @@ def fetch_all(urls: list[str]) -> tuple[list[dict], list[str]]:
             events.extend(slim)
             dirty = True
         except Exception:
-            # Stale cache beats no data, but the URL is still reported as failed
-            # so the caller can flag the answer as unverified.
+            # Expired cache beats no data, but it is only evidence the event
+            # existed at some unbounded past time, so each copy is tagged and
+            # lookup won't answer FOUND on a tag alone. Copies are tagged, not
+            # `cache[key]` itself, because another feed succeeding sets `dirty`,
+            # which would write the tag into the cache file as if permanent.
             if hit:
-                events.extend(hit.get("events", []))
+                events.extend(dict(e, **{STALE_TAG: True})
+                              for e in hit.get("events", []))
             failed.append(url)
 
     if dirty:
         try:
             with open(CACHE_PATH, "w", encoding="utf-8", newline="\n") as fh:
-                json.dump(cache, fh, ensure_ascii=False)
+                # Entries for URLs no longer configured are dropped, or a feed
+                # removed from config.json would keep answering out of the
+                # cache file forever.
+                json.dump({k: v for k, v in cache.items() if k in wanted},
+                          fh, ensure_ascii=False)
         except Exception:
             pass
     return events, failed
@@ -230,24 +256,50 @@ def lookup(subject: str, date_text: str) -> dict:
     if not urls:
         return {"status": "UNCHECKED", "reason": why}
 
-    target = event_date(date_text) if date_text else None
+    # An unparseable --date is not the same as no --date. Falling through to
+    # the title-only branch would answer FOUND off the title alone, so a typo
+    # like 2026-02-31 could cancel a todo by matching a different month's
+    # event with the same name.
+    target = None
+    if date_text:
+        target = event_date(date_text)
+        if target is None:
+            return {"status": "UNCHECKED",
+                    "reason": "could not read --date " + date_text}
+
     events, failed = fetch_all(urls)
 
     if not events and failed:
         return {"status": "UNCHECKED", "reason": "all calendar feeds failed",
                 "failedFeeds": len(failed)}
 
+    stale_hit: dict | None = None
     for ev in events:
         if not titles_match(subject, ev.get("SUMMARY", "")):
             continue
         if target is None:
-            return {"status": "FOUND", "summary": ev.get("SUMMARY", ""),
-                    "dtstart": ev.get("DTSTART", ""), "matchedOn": "title only"}
-        start = event_date(ev.get("DTSTART", ""))
-        if start == target or rrule_covers(ev, target):
-            return {"status": "FOUND", "summary": ev.get("SUMMARY", ""),
-                    "dtstart": ev.get("DTSTART", ""),
-                    "matchedOn": "title and date"}
+            matched_on = "title only"
+        else:
+            start = event_date(ev.get("DTSTART", ""))
+            if not (start == target or rrule_covers(ev, target)):
+                continue
+            matched_on = "title and date"
+        # Remember and keep scanning rather than returning. A later event may
+        # match from a live feed, and one live match is enough for presence.
+        if ev.get(STALE_TAG):
+            stale_hit = stale_hit or ev
+            continue
+        return {"status": "FOUND", "summary": ev.get("SUMMARY", ""),
+                "dtstart": ev.get("DTSTART", ""), "matchedOn": matched_on}
+
+    if stale_hit is not None:
+        # Presence needs one live source; an expired copy is not one. Answering
+        # FOUND here would cancel the todo for an event the user may already
+        # have deleted, and nothing would ever say so.
+        return {"status": "UNCHECKED",
+                "reason": "only an expired cache copy matched",
+                "failedFeeds": len(failed),
+                "summary": stale_hit.get("SUMMARY", "")}
 
     out = {"status": "NOT_FOUND", "eventsScanned": len(events)}
     if failed:

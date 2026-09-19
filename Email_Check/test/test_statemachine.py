@@ -1527,6 +1527,59 @@ check("an omitted field is still fine", not _shape_error({}))
 check("well-formed lists are still fine",
       not _shape_error({"important": [{"id": "m1"}], "judgedIds": ["a", 1]}))
 
+# Entry fields with a type-sensitive consumer. deadline crashes in-round, which
+# is loud but recoverable. The two counting fields are the dangerous ones: they
+# survive reconcile_* into state.json, and every later begin or commit then
+# raises on int(), wedging the schedule until state.json is hand-edited.
+check("a non-string deadline is refused",
+      _shape_error({"todos": [{"id": "m1", "deadline": 123}]}))
+check("a non-int firstDeferredRound is refused",
+      _shape_error({"defer": [{"id": "d1", "firstDeferredRound": [1]}]}))
+check("a non-int createdRound is refused",
+      _shape_error({"todos": [{"id": "t1", "createdRound": [1]}]}))
+check("a non-string subject is refused, it is a GUI sort key",
+      _shape_error({"todos": [{"id": "t1", "subject": 123}]}))
+check("True is not an acceptable round number",
+      _shape_error({"todos": [{"id": "t1", "createdRound": True}]}))
+check("correctly typed entry fields pass",
+      not _shape_error({"todos": [{"id": "t1", "subject": "Pay", "deadline": "",
+                                   "createdRound": 4, "uncertain": True}]}))
+# bool() is true for every non-empty string, so "false" would display as
+# 待確認 -- a wrong answer, not a crash.
+check("a stringy uncertain is refused",
+      _shape_error({"todos": [{"id": "t1", "uncertain": "false"}]}))
+
+# The gate must not refuse what the old code handled correctly, or a
+# reporter repeating the same safe mistake keeps losing a whole round to it.
+check("an explicit null entry field is an omission, not a wrong type",
+      not _shape_error({"todos": [{"id": "m1", "action": "Pay",
+                                   "deadline": None}]}))
+check("a numeric id is accepted, every consumer str()s it",
+      not _shape_error({"todos": [{"id": 123, "action": "Pay"}]}))
+check("_merge really does drop None, which is why the above is safe",
+      sm._merge({}, {"id": "m1", "deadline": None}) == {"id": "m1"})
+check("and _usable_id really does normalise a numeric id",
+      sm._usable_id({"id": 123}) == "123")
+
+# The counting fields must never reach state.json, so prove the refusal happens
+# at ingestion rather than one round later.
+for label, payload in (
+        ("firstDeferredRound", {"defer": [{"id": "d1",
+                                           "firstDeferredRound": [1]}]}),
+        ("createdRound", {"todos": [{"id": "t1", "action": "pay",
+                                     "createdRound": [1]}]})):
+    st_w = sm.State({"horizon": 2000, "intervals": [[1000, 2000]]})
+    st_w.save(); sm.Progress(2000).save()
+    json.dump(payload, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+    rc_w = sm.cmd_step(type("A", (), {"failed": False, "lo": 1000, "hi": 2000,
+                                      "count": 3})())
+    saved = json.load(open(sm.STATE_PATH, encoding="utf-8"))
+    check(f"a bad {label} never lands in state.json",
+          rc_w == 2 and not saved["pendingJudge"] and not saved["todos"], saved)
+    json.dump({}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+    check(f"so the next begin still runs after a bad {label}",
+          sm.cmd_begin(None) == 0)
+
 # The assertion that matters. A shape error is only safe if the interval
 # survives it, so the next round rescans the span this batch came from.
 st10 = sm.State({"horizon": 2000, "intervals": [[1000, 2000]]})

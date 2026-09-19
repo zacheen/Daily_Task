@@ -2,6 +2,7 @@
 
 import datetime as dt
 import importlib.util
+import json
 import os
 import shutil
 import sys
@@ -161,6 +162,7 @@ check("a non-https url is not usable",
 cc.CONFIG_PATH = os.path.join(os.path.dirname(SRC), "config.json")
 
 # A partially failed fetch also cannot prove absence.
+real_fetch_all = cc.fetch_all
 cc.load_urls = lambda: (["https://example.invalid/a.ics",
                          "https://example.invalid/b.ics"], "")
 cc.fetch_all = lambda urls: (cc.parse_events(ICS), ["https://example.invalid/b.ics"])
@@ -181,6 +183,85 @@ res = cc.lookup("Synced invitation: ✨AI201-1B | Live Class ✨", "2026-09-23")
 check("a weekly class is FOUND on a later occurrence", res["status"] == "FOUND", res)
 res = cc.lookup("Campus to Career: Guest Speaker", "2026-09-11")
 check("an event that is not there is NOT_FOUND", res["status"] == "NOT_FOUND", res)
+
+# A date that cannot be read is not the same as no date. Falling back to the
+# title-only branch answered FOUND off the title alone, so a typo could cancel
+# the todo by matching a different month's event with the same name.
+res = cc.lookup("Tesla Supercharging Your Resume Workshop", "2026-02-31")
+check("an impossible date gives UNCHECKED, not a title-only FOUND",
+      res["status"] == "UNCHECKED", res)
+res = cc.lookup("Tesla Supercharging Your Resume Workshop", "not a date")
+check("unreadable date text gives UNCHECKED too", res["status"] == "UNCHECKED", res)
+res = cc.lookup("Tesla Supercharging Your Resume Workshop", "")
+check("an omitted date still matches on title alone",
+      res["status"] == "FOUND" and res["matchedOn"] == "title only", res)
+
+# Presence needs one live source. An expired copy served only because the fetch
+# failed is evidence the event existed some unbounded time ago, nothing more.
+tagged = [dict(e, **{cc.STALE_TAG: True}) for e in cc.parse_events(ICS)]
+cc.fetch_all = lambda urls: (tagged, ["https://example.invalid/a.ics"])
+res = cc.lookup("Tesla Supercharging Your Resume Workshop", "2026-09-08")
+check("a match found only in an expired cache copy is UNCHECKED",
+      res["status"] == "UNCHECKED", res)
+# The reverse guard: one live feed answering is still enough, so fixing the
+# above must not downgrade every FOUND that coexists with a failed feed.
+cc.fetch_all = lambda urls: (tagged + cc.parse_events(ICS),
+                             ["https://example.invalid/a.ics"])
+res = cc.lookup("Tesla Supercharging Your Resume Workshop", "2026-09-08")
+check("a live match alongside an expired one is still FOUND",
+      res["status"] == "FOUND", res)
+cc.fetch_all = real_fetch_all
+
+# Cache slots are keyed by URL. Under the old positional key, replacing a feed
+# kept serving the previous calendar's events from the same slot.
+check("two urls never share a cache slot",
+      cc._cache_key("https://a.example/x.ics") != cc._cache_key("https://b.example/x.ics"))
+check("the same url always lands in the same slot",
+      cc._cache_key("https://a.example/x.ics") == cc._cache_key("https://a.example/x.ics"))
+
+# The tag lives in memory only. The cached dicts are the ones fetch_all hands
+# back, so tagging them in place would write the tag into the cache file as
+# soon as another feed succeeded and set `dirty`.
+#
+# One live feed is required here, not just the failed one. Without it `dirty`
+# stays false, the cache is never rewritten, and an in-place implementation
+# would pass this test too.
+dead = "https://example.invalid/dead.ics"
+live = "https://example.invalid/live.ics"
+
+
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return ICS.encode("utf-8")
+
+
+def _fake_urlopen(req, timeout=None):
+    if getattr(req, "full_url", req) == live:
+        return _FakeResponse()
+    raise OSError("unreachable")
+
+
+cc.CACHE_PATH = os.path.join(WORK, "cache.json")
+json.dump({cc._cache_key(dead): {"at": 0, "events": [{"SUMMARY": "Old Thing"}]}},
+          open(cc.CACHE_PATH, "w", encoding="utf-8"))
+real_urlopen = cc.urllib.request.urlopen
+cc.urllib.request.urlopen = _fake_urlopen
+evs_out, failed_out = real_fetch_all([dead, live])
+cc.urllib.request.urlopen = real_urlopen
+stale_out = [e for e in evs_out if e.get(cc.STALE_TAG)]
+check("an expired entry is still served when its fetch fails",
+      len(stale_out) == 1 and failed_out == [dead], (stale_out, failed_out))
+check("the live feed's events are not tagged",
+      len(evs_out) > len(stale_out), len(evs_out))
+on_disk = open(cc.CACHE_PATH, encoding="utf-8").read()
+check("the live feed did rewrite the cache file", cc._cache_key(live) in on_disk)
+check("but the tag never reaches the cache file", cc.STALE_TAG not in on_disk)
 
 shutil.rmtree(WORK, ignore_errors=True)
 

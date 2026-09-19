@@ -1018,6 +1018,31 @@ class FindingsError(Exception):
 # elements are checked differently.
 _FINDING_ITEM_LISTS = ("important", "failedNotify", "defer", "todos")
 _FINDING_ID_LISTS = ("notifiedIds", "judgedIds")
+# Per-entry fields whose consumer would be wrong or would crash on another
+# type. Unlisted fields are only stored and rendered.
+#
+# The two counting fields matter most: unlike deadline, which just crashes and
+# gets rescanned, they survive reconcile_* into state.json, so a bad one wedges
+# every later begin/commit on int() until state.json is hand-edited.
+# INSTRUCTIONS already tells the LLM never to send them, so an arriving one is
+# purely a fault worth refusing.
+#
+# Tuples: a type some consumer normalises safely must stay accepted, or a
+# report that would have worked loses a whole round every time the reporter
+# repeats that same safe mistake.
+_FINDING_ENTRY_TYPES: dict[str, tuple[type, ...]] = {
+    # _usable_id and the GUI both do str(), so a numeric id is fine
+    "id": (str, int),
+    "from": (str,), "subject": (str,), "snippet": (str,), "mailbox": (str,),
+    "received": (str,), "action": (str,), "summary": (str,),
+    # resolve_deadline does (text or "").strip()
+    "deadline": (str,),
+    # split_debt and cmd_commit both do int() on these
+    "firstDeferredRound": (int,), "createdRound": (int,),
+    # The GUI's bool() is true for any non-empty string, so "false" would
+    # silently display as 待確認 -- a wrong answer, not a crash.
+    "uncertain": (bool,),
+}
 
 
 def _check_findings_shape(data: dict[str, Any]) -> None:
@@ -1034,7 +1059,8 @@ def _check_findings_shape(data: dict[str, Any]) -> None:
     field just discarded.
 
     Elements are checked too, for the same reason: one null inside `todos` is
-    one todo that never lands.
+    one todo that never lands. So are the entry fields in _FINDING_ENTRY_TYPES,
+    which is the only place a bad value can outlive the round.
     """
     for field in _FINDING_ITEM_LISTS:
         # `field not in data`, never `value is None`: .get() can't tell an
@@ -1047,6 +1073,22 @@ def _check_findings_shape(data: dict[str, Any]) -> None:
             raise FindingsError(f"{field} is {type(value).__name__}, not a list")
         if not all(isinstance(x, dict) for x in value):
             raise FindingsError(f"{field} holds a non-object entry")
+        for entry in value:
+            for key, want in _FINDING_ENTRY_TYPES.items():
+                got = entry.get(key)
+                # None means omission, not a wrong type: _merge drops every
+                # None before a consumer sees it, so refusing it would reject
+                # reports the old code handled.
+                if key not in entry or got is None:
+                    continue
+                # bool subclasses int, so True passes an int check unless bool
+                # is what the consumer actually wants.
+                if isinstance(got, bool) and bool not in want:
+                    raise FindingsError(f"{field}[].{key} is a boolean")
+                if not isinstance(got, want):
+                    raise FindingsError(
+                        f"{field}[].{key} is {type(got).__name__}, not "
+                        + "/".join(t.__name__ for t in want))
     for field in _FINDING_ID_LISTS:
         if field not in data:
             continue
