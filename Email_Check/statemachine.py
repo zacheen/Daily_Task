@@ -156,8 +156,11 @@ def excluded_senders() -> list[str]:
 def excluded_labels() -> list[str]:
     """Gmail labels every search strips out, read from config.json.
 
-    These are the user's own hand-applied tags, so re-judging one every round
-    only spends tokens re-deriving a decision the user already made.
+    These come from an exclusion rule the user set up, usually a Gmail filter
+    that tags on arrival, so re-judging one every round only spends tokens
+    re-deriving a decision the user already made. The decision rides on the
+    rule, not on the message, so an untagged message proves nothing about
+    whether the user has seen it.
 
     Stronger than a sender exclusion: a sender exclusion covers a source that
     never carries anything actionable, while a label can sit on one message
@@ -1011,14 +1014,59 @@ class FindingsError(Exception):
     """round.json exists but could not be trusted for this round."""
 
 
+# round.json fields every caller concatenates or iterates. Split because their
+# elements are checked differently.
+_FINDING_ITEM_LISTS = ("important", "failedNotify", "defer", "todos")
+_FINDING_ID_LISTS = ("notifiedIds", "judgedIds")
+
+
+def _check_findings_shape(data: dict[str, Any]) -> None:
+    """Refuse a report whose list fields are the wrong shape.
+
+    `"important": null` used to raise TypeError on the `+` in cmd_step, which
+    was loud but safe, because it fired before coverage.retire and nothing was
+    saved. Dropping the bad field instead would be silent and unsafe: cmd_step
+    would retire the interval anyway and the batch would be gone, with the
+    watermark already past it.
+
+    So a bad shape must raise. Keep-by-default can't substitute -- it only
+    protects debt already in a queue, never a batch whose only copy was the
+    field just discarded.
+
+    Elements are checked too, for the same reason: one null inside `todos` is
+    one todo that never lands.
+    """
+    for field in _FINDING_ITEM_LISTS:
+        # `field not in data`, never `value is None`: .get() can't tell an
+        # omitted field (a valid empty report) from an explicit null (a
+        # reporting mistake).
+        if field not in data:
+            continue
+        value = data[field]
+        if not isinstance(value, list):
+            raise FindingsError(f"{field} is {type(value).__name__}, not a list")
+        if not all(isinstance(x, dict) for x in value):
+            raise FindingsError(f"{field} holds a non-object entry")
+    for field in _FINDING_ID_LISTS:
+        if field not in data:
+            continue
+        value = data[field]
+        if not isinstance(value, list):
+            raise FindingsError(f"{field} is {type(value).__name__}, not a list")
+        # str(x) never raises -- this checks for a plausible Gmail id, not
+        # crash safety.
+        if not all(isinstance(x, (str, int)) for x in value):
+            raise FindingsError(f"{field} holds an entry that is not an id")
+
+
 def _read_findings(token: str | None = None) -> dict[str, Any]:
     """Findings for this round, or raise.
 
-    A missing file is a valid empty result. A corrupt file, an unreadable file,
-    or a file stamped with a different round's token is not, and must never be
-    flattened into "this batch found nothing" -- cmd_step retires the interval
-    right after, so a false empty means the watermark moves past mail that was
-    never recorded anywhere.
+    A missing file is a valid empty result. A corrupt file, an unreadable
+    file, a wrong-round token, or list fields of the wrong shape are not, and
+    must never be flattened into "this batch found nothing" -- cmd_step
+    retires the interval right after, so a false empty means the watermark
+    moves past mail that was never recorded anywhere.
 
     The token check is what stops four concurrent schedules from cross-talking
     through one shared file. Another round overwriting round.json between this
@@ -1037,6 +1085,7 @@ def _read_findings(token: str | None = None) -> dict[str, Any]:
     stamped = data.get("roundToken")
     if token is not None and stamped is not None and str(stamped) != token:
         raise FindingsError("round.json belongs to round " + str(stamped))
+    _check_findings_shape(data)
     return data
 
 

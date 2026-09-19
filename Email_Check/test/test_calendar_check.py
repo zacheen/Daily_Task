@@ -109,6 +109,28 @@ check("a non-recurring event is not covered by rrule",
 check("an unsupported FREQ falls through to False",
       not cc.rrule_covers({"RRULE": "FREQ=SECONDLY", "DTSTART": "20260101"},
                           dt.date(2026, 1, 2)))
+# Every one of these used to be ignored rather than refused, which widened the
+# match and produced a FOUND for a day the event does not fall on.
+check("INTERVAL=2 is refused rather than ignored",
+      not cc.rrule_covers(
+          {"RRULE": "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE", "DTSTART": "20260902"},
+          dt.date(2026, 9, 9)))
+check("INTERVAL=1 is still honoured",
+      cc.rrule_covers(
+          {"RRULE": "FREQ=WEEKLY;INTERVAL=1;BYDAY=WE", "DTSTART": "20260902"},
+          dt.date(2026, 9, 9)))
+check("COUNT is refused, because it bounds a run this cannot count",
+      not cc.rrule_covers(
+          {"RRULE": "FREQ=WEEKLY;BYDAY=WE;COUNT=2", "DTSTART": "20260902"},
+          dt.date(2026, 10, 7)))
+check("BYMONTHDAY is refused rather than overruled by DTSTART",
+      not cc.rrule_covers(
+          {"RRULE": "FREQ=MONTHLY;BYMONTHDAY=15", "DTSTART": "20260902"},
+          dt.date(2026, 10, 2)))
+check("MONTHLY with BYDAY is refused, not read as a day-of-month rule",
+      not cc.rrule_covers(
+          {"RRULE": "FREQ=MONTHLY;BYDAY=3TU", "DTSTART": "20260902"},
+          dt.date(2026, 10, 2)))
 
 # With no URLs configured the answer must be UNCHECKED, never NOT_FOUND.
 # NOT_FOUND would be a claim we cannot make, and it changes what the caller does.

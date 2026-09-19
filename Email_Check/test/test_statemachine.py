@@ -116,7 +116,8 @@ a4 = json.load(open(sm.STATE_PATH, encoding="utf-8"))
 ids4 = sorted(x["id"] for x in a4["pendingJudge"])
 check("judge debt left off the report survives commit", ids4 == ["old-A", "old-B", "old-C"], ids4)
 
-# --- judgedIds is the only way an item leaves the judge queue ---
+# --- judgedIds is how an item leaves the judge queue when it was not
+# --- promoted to the notify queue by being reported important ---
 st5 = sm.State({"horizon": 100, "roundSeq": 8,
                 "pendingJudge": [{"id": "j1", "firstDeferredRound": 8},
                                  {"id": "j2", "firstDeferredRound": 8}]})
@@ -1499,6 +1500,47 @@ for label, fn, arg in (("step", sm.cmd_step, type("A", (), {"failed": True, "lo"
         check(f"cmd_{label} aborts cleanly on corrupt state", fn(arg) == 2)
     except Exception as exc:
         check(f"cmd_{label} aborts cleanly on corrupt state", False, type(exc).__name__)
+
+# --- a wrong shape in round.json must refuse the round, never be absorbed ---
+# Dropping the bad field looked safer but isn't: cmd_step retires the interval
+# either way, so the batch's only copy disappears with the watermark already
+# past it. Keep-by-default doesn't help, since nothing here ever reached a queue.
+def _shape_error(payload):
+    json.dump(payload, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+    try:
+        sm._read_findings(None)
+        return False
+    except sm.FindingsError:
+        return True
+
+
+check("an explicit null is a shape error", _shape_error({"important": None}))
+check("a bare object where a list belongs is a shape error",
+      _shape_error({"important": {"id": "m1"}}))
+check("a string where a list belongs is a shape error",
+      _shape_error({"todos": "nope"}))
+check("one non-object entry poisons the whole list",
+      _shape_error({"defer": [{"id": "d1"}, None]}))
+check("an id list holding an object is a shape error",
+      _shape_error({"notifiedIds": [{"id": "x"}]}))
+check("an omitted field is still fine", not _shape_error({}))
+check("well-formed lists are still fine",
+      not _shape_error({"important": [{"id": "m1"}], "judgedIds": ["a", 1]}))
+
+# The assertion that matters. A shape error is only safe if the interval
+# survives it, so the next round rescans the span this batch came from.
+st10 = sm.State({"horizon": 2000, "intervals": [[1000, 2000]]})
+st10.save(); sm.Progress(2000).save()
+json.dump({"important": {"id": "m1", "summary": "recruiter wants a call"}},
+          open(sm.ROUND_PATH, "w", encoding="utf-8"))
+rc10 = sm.cmd_step(type("A", (), {"failed": False, "lo": 1000, "hi": 2000,
+                                  "count": 3})())
+a10 = json.load(open(sm.STATE_PATH, encoding="utf-8"))
+check("a malformed report makes step refuse, not proceed", rc10 == 2, rc10)
+check("the interval is not retired on a malformed report",
+      a10["intervals"] == [[1000, 2000]], a10["intervals"])
+check("the watermark does not move past the unrecorded batch",
+      a10["coveredThrough"] == 1000, a10["coveredThrough"])
 
 # --- corrupt state must abort, never invent a watermark ---
 open(sm.STATE_PATH, "w").write("{ not json")

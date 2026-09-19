@@ -39,6 +39,9 @@ FETCH_TIMEOUT = 25
 MIN_TOKEN_OVERLAP = 0.6
 
 WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+# RRULE parts rrule_covers actually models. An unlisted part means the rule is
+# narrower than what it computes, so it refuses the event instead.
+RRULE_SUPPORTED = {"FREQ", "BYDAY", "UNTIL", "INTERVAL", "WKST"}
 _NOISE = re.compile(r"[^0-9a-z一-鿿]+")
 _STOP = {"the", "a", "an", "and", "or", "of", "for", "to", "your", "you",
          "invitation", "invite", "invited", "synced", "reminder", "workshop",
@@ -117,13 +120,22 @@ def rrule_covers(ev: dict, target: dt.date) -> bool:
     """Whether a recurring event plausibly falls on `target`.
 
     Only enough of RRULE is handled to cover the real case, a weekly class with
-    an UNTIL date. Anything more exotic falls through to False so the caller
-    reports NOT_FOUND rather than guessing FOUND.
+    an UNTIL date. Every other part is rejected rather than ignored, because
+    ignoring one always widens the match: INTERVAL=2 would match the skipped
+    weeks, COUNT would recur forever, BYMONTHDAY would be overruled by the
+    DTSTART comparison. A widened match is a false FOUND, which suppresses the
+    todo for an event that is not actually on the calendar.
     """
     rule = ev.get("RRULE", "")
     if not rule:
         return False
     parts = dict(p.split("=", 1) for p in rule.split(";") if "=" in p)
+    if parts.keys() - RRULE_SUPPORTED:
+        return False
+    # WKST is in the supported set only because it changes nothing once
+    # INTERVAL > 1 is refused below; it exists to place week boundaries.
+    if parts.get("INTERVAL", "1") != "1":
+        return False
     start = event_date(ev.get("DTSTART", ""))
     if start is None or target < start:
         return False
@@ -131,6 +143,8 @@ def rrule_covers(ev: dict, target: dt.date) -> bool:
     if until and target > until:
         return False
     freq = parts.get("FREQ", "")
+    if "BYDAY" in parts and freq != "WEEKLY":
+        return False
     if freq == "DAILY":
         return True
     if freq == "WEEKLY":
