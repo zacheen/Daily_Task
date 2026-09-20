@@ -48,6 +48,11 @@ Personal_Task/
 # keeps off it. Absolute paths in it are machine-specific anyway.
 .claude/settings.local.json
 
+# Deliberation transcripts from the gather-thoughts workflow. They quote this
+# machine's own usage and spend figures while comparing options, which is
+# per-machine and nobody else's business.
+.claude/gather-thoughts/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
