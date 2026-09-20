@@ -1595,6 +1595,63 @@ check("the interval is not retired on a malformed report",
 check("the watermark does not move past the unrecorded batch",
       a10["coveredThrough"] == 1000, a10["coveredThrough"])
 
+# --- a frontier that stops moving is an outage, not a quiet mailbox ---
+# The whole point of watching coverage rather than mail volume is that an empty
+# interval retires exactly like a full one, so silence from the mailbox can
+# never be mistaken for a task that stopped finishing rounds.
+NOW = int(_time.time())
+# emit was handed back to the real one further up, so capture it again here.
+stall_out = []
+_was_stall_emit = sm.emit
+sm.emit = stall_out.append
+
+
+def begin_stall(horizon, fresh=False):
+    stall_out.clear()
+    _clear(sm.STATE_PATH, sm.ROUND_PATH)
+    if not fresh:
+        sm.State({"horizon": horizon, "roundSeq": 40}).save()
+    sm.cmd_begin(None)
+    return stall_out[-1]
+
+
+out_ok = begin_stall(NOW - 3600)
+check("an hour behind says nothing at all", "coverageStalled" not in out_ok
+      and "stalledHours" not in out_ok, out_ok)
+
+out_bad = begin_stall(NOW - 30 * 3600)
+check("thirty hours behind is a stall", out_bad["coverageStalled"] is True, out_bad)
+check("and the message has the elapsed hours to show",
+      out_bad["stalledHours"] == 30, out_bad["stalledHours"])
+
+out_edge = begin_stall(NOW - 8 * 3600 - 15 * 60)
+check("the longest normal gap between schedules is not a stall",
+      "coverageStalled" not in out_edge, out_edge)
+
+# A first run seeds the horizon exactly FIRST_RUN_LOOKBACK back, which is the
+# threshold itself, so without its own exemption the very first round would
+# report a stall on state it just created.
+out_first = begin_stall(None, fresh=True)
+check("a first run does not report a stall", out_first["firstRun"] is True
+      and "coverageStalled" not in out_first, out_first)
+
+# Finding nothing still retires the interval, so the frontier catches up.
+stall_out.clear()
+_clear(sm.STATE_PATH, sm.ROUND_PATH)
+sm.State({"horizon": NOW - 2 * 3600, "roundSeq": 41}).save()
+sm.cmd_begin(None)
+iv = json.load(open(sm.STATE_PATH, encoding="utf-8"))["intervals"][0]
+sm.cmd_step(type("A", (), {"failed": False, "lo": iv[0], "hi": iv[1], "count": 0})())
+check("an interval that found no mail still retires",
+      json.load(open(sm.STATE_PATH, encoding="utf-8"))["intervals"] == [],
+      json.load(open(sm.STATE_PATH, encoding="utf-8"))["intervals"])
+stall_out.clear()
+sm.cmd_begin(None)
+out_quiet = stall_out[-1]
+check("so a silent mailbox never reads as a stall",
+      "coverageStalled" not in out_quiet, out_quiet)
+sm.emit = _was_stall_emit
+
 # --- corrupt state must abort, never invent a watermark ---
 open(sm.STATE_PATH, "w").write("{ not json")
 try:

@@ -55,6 +55,9 @@ BOUNDARY_SLACK = 900
 # rather than as recently overdue. Mirrors the viewer's own constant.
 BARE_DEADLINE_LOOKBACK = 3
 FIRST_RUN_LOOKBACK = 24 * 3600
+# Must exceed the longest gap between the four schedules, 8h15m from 22:10 to
+# 06:25, or every morning would report a stall.
+STALL_ALERT_SECONDS = 24 * 3600
 JUDGE_WAIT_LIMIT_ROUNDS = 2
 # How many rounds a notice stays reviewable before it is swept into the archive,
 # where ARCHIVE_TTL disposes of it. One means "until the next round", which is
@@ -1207,9 +1210,27 @@ def cmd_begin(_args) -> int:
     prog.save()
     state.save()
 
+    # cmd_step retires an interval by its query bounds, not by what it found, so
+    # an empty mailbox advances the frontier exactly as a full one does. A
+    # frontier that stops moving therefore means rounds are not finishing,
+    # never that mail went quiet. Unlike the config alert this isn't throttled
+    # to the transition: a stalled frontier is an outage, and the round that
+    # would carry a one-shot notice is the very round that's failing to run.
+    # A first run seeds the horizon FIRST_RUN_LOOKBACK behind now, which equals
+    # the threshold, so without this exemption the round that creates the
+    # state would itself report a stall.
+    stalled_for = 0 if first_run else max(0, now - state.coverage.covered_through)
+
     out = {"status": "PROCEED", "firstRun": first_run, "scanEnd": now,
            "roundSeq": state.roundSeq, "roundToken": prog.token,
            "notifiedIds": state.notifiedIds}
+    # Present only while stalled, so the key appearing is itself the signal. A
+    # number reported every round is a number the LLM has to decide to ignore
+    # every round, and deciding is exactly what this file exists to take away
+    # from it. Nothing else reads these, so absence costs no caller anything.
+    if stalled_for >= STALL_ALERT_SECONDS:
+        out["coverageStalled"] = True
+        out["stalledHours"] = stalled_for // 3600
     # Read, never written, so the GUI keeps sole ownership of the tick file.
     # An unreadable one falls back to pushing: a duplicate toast is recoverable,
     # a notification that is never sent is not.
