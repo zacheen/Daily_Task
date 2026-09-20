@@ -31,12 +31,16 @@ Email_Check/task_list/.sm.*.tmp
 # Calendar feed cache. Derived, and holds real event titles.
 Email_Check/calendar-cache.json
 
-# Task folders that work with personal data. Excluded wholesale rather than by
-# subpath, because a single stray file is enough to leak. Each is versioned in
-# its own private repo. This rule lives here rather than .git/info/exclude so
-# that it survives being copied into a fresh repo, which is when an accidental
-# `git add .` would otherwise sweep the whole folder in.
-Qualification/
+# Every task folder that works with personal data lives under here, so that one
+# rule covers the ones added later too. A per-folder rule made exposure the
+# default until someone remembered to write it, and a single stray file is
+# enough to leak. Each task inside is versioned in its own private repo. The
+# rule lives here rather than .git/info/exclude so that it survives being
+# copied into a fresh repo, which is when an accidental `git add .` would
+# otherwise sweep the whole folder in. Excluding the directory also means git
+# cannot re-include anything inside it, so a file that ever needs tracking has
+# to move out rather than be negated back in.
+Personal_Task/
 
 # Per-machine permission rules for the scheduled tasks. The allowlist has to
 # name the sites and the folders each task touches, which for the folders

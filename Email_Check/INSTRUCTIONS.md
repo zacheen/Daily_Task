@@ -92,7 +92,7 @@ allowlist 是逐字比對的，**不在上面的命令會停在權限提示，�
 提示會一直留在 app 裡等人按，沒人按就整輪不跑，而且不會有任何告警。
 
 **不要說「專案設定檔在排程時不會被載入」**，那個推測 2026-09-10 已被實測推翻：
-Qualification 任務每天寫 `Qualification/reports/` 與 `Qualification/baseline.md`，連續七天都成功，
+Qualification 任務每天寫 `Personal_Task/Qualification/reports/` 與 `Personal_Task/Qualification/baseline.md`，連續七天都成功，
 而涵蓋那些路徑的規則只存在專案檔裡。所以專案層是會生效的。
 
 真正的原因還沒確定。目前最可疑的是命令開頭那個 `&`：它是 PowerShell 的呼叫運算子，
@@ -131,6 +131,13 @@ Qualification 任務每天寫 `Qualification/reports/` 與 `Qualification/baseli
 | `Bash(grep:*)` / `Bash(sed -n:*)` / `Bash(head:*)` / `Bash(tail:*)` | 唯讀的保險絲，見上一節，正常流程不該用到 |
 
 那四條唯讀形式是保險絲，不是許可，不能拿來翻 `statemachine.py` 的原始碼。
+
+**上面那張表不是專案檔的全部。** 同一份 `.claude/settings.local.json` 服務這個
+工作目錄底下的每一個排程任務，而 `Personal_Task/` 裡的任務另有自己的網域與路徑規則，
+那些規則不能寫進這份文件，因為這個 repo 是公開的。各自的規格寫在該任務自己的
+SKILL.md 裡，位置在使用者家目錄的 `.claude/scheduled-tasks/` 底下。
+重建專案檔時要兩邊都看過，只照這張表重建會漏掉一半，
+而漏掉的那一半是在排程時無聲失敗，不是在互動時報錯。
 
 兩層設定檔裡另外還留著一條舊的 `Start-Process` 規則，它直接寫死本機的
 `pythonw.exe` 路徑。**已無呼叫端，保留備查，不要改回去用它。** 那個路徑含本機使用者
