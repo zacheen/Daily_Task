@@ -266,3 +266,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# added by guard_local_only_files.py
+Known_concern.md
+
+# added by guard_local_only_files.py
+Pending_fix.md
