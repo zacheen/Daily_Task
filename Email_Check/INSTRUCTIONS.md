@@ -51,6 +51,8 @@ Gmail MCP 工具的 account 參數一定要傳 `"scout"`。這個帳號代號是
 
 腳本一律用這個形式呼叫，**字串固定，不要改寫**，因為 allowlist 是逐字比對的。
 
+**所有命令一律用 Bash 工具跑，包括這份文件沒列出的。** 用 PowerShell 工具跑同一行也有規則放行，但那是模型沒照做時的保險，不是正常路徑。
+
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" <subcommand>
 ```
@@ -133,7 +135,7 @@ Qualification 任務每天寫 `Personal_Task/Qualification/reports/` 與 `Person
 
 那四條唯讀形式是保險絲，不是許可，不能拿來翻 `statemachine.py` 的原始碼。
 
-**allow 規則綁在工具上，同一行命令換個工具就對不上。** `Bash(...)` 規則只比對 Bash 工具的呼叫，模型如果改用 PowerShell 工具跑一字不差的同一行命令，照樣會停在提示上。這台機器上的 Claude Code 把 PowerShell 當主要 shell，而第 1 步那種沒註明工具的命令區塊，每一輪用哪個工具等於由模型臨場決定。gmail-check-2210 在 2026-09-23 與 2026-09-25 兩輪都是這樣用 PowerShell 跑 `begin`，兩輪都卡在提示上，前一輪連 status 都沒拿到，也沒有任何告警。到 2026-09-25 為止的 70 輪裡只有這 2 輪選了 PowerShell，其餘都是 Bash，而四個任務的 SKILL.md 只差名稱與說明兩行，所以這不是哪個任務特有的問題，每個任務都可能抽到。2026-09-26 補上 PowerShell 版之後，用 `claude -p --tools PowerShell --permission-mode default` 分別只載入使用者層、只載入專案層，跑狀態機與日曆的 `--help`，兩層都沒有被拒，同樣方式跑一行清單外的命令則被拒。`notify.ps1` 與 `open-task-list.ps1` 的 PowerShell 版沒有實測，因為跑下去會真的跳通知、開視窗。
+**allow 規則綁在工具上，同一行命令換個工具就對不上。** `Bash(...)` 規則只比對 Bash 工具的呼叫，模型如果改用 PowerShell 工具跑一字不差的同一行命令，照樣會停在提示上。這台機器上的 Claude Code 把 PowerShell 當主要 shell，而第 1 步那種沒註明工具的命令區塊，每一輪用哪個工具等於由模型臨場決定。gmail-check-2210 在 2026-09-23 與 2026-09-25 兩輪都是這樣用 PowerShell 跑 `begin`，兩輪都卡在提示上，前一輪連 status 都沒拿到，也沒有任何告警。到 2026-09-25 為止的 70 輪裡只有這 2 輪選了 PowerShell，其餘都是 Bash，而四個任務的 SKILL.md 只差名稱與說明兩行，所以這不是哪個任務特有的問題，每個任務都可能抽到。2026-09-26 補上 PowerShell 版之後，用 `claude -p --tools PowerShell --permission-mode default` 分別只載入使用者層、只載入專案層，跑狀態機與日曆的 `--help`，兩層都沒有被拒，同樣方式跑一行清單外的命令則被拒。`notify.ps1` 與 `open-task-list.ps1` 的 PowerShell 版沒有實測，因為跑下去會真的跳通知、開視窗。這個現象是 2026-09-22 排程改用新模型之後才出現的，之前 55 輪全部走 Bash，之後到 2026-09-27 的 20 輪裡有 3 輪走 PowerShell，模型與 Claude Code 版本是同一天一起換的，分不出是哪一個造成。所以從 2026-09-27 起每一步的命令都明寫用 Bash 工具跑，PowerShell 版規則留著當保險。
 
 **上面那張表不是專案檔的全部。** 同一份 `.claude/settings.local.json` 服務這個
 工作目錄底下的每一個排程任務，而 `Personal_Task/` 裡的任務另有自己的網域與路徑規則，
@@ -189,6 +191,8 @@ SKILL.md 裡，位置在使用者家目錄的 `.claude/scheduled-tasks/` 底下�
 
 
 ### 1. begin
+
+**用 Bash 工具跑。**
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" begin
@@ -308,7 +312,7 @@ Gmail 檢查已經 <stalledHours> 小時沒有跑完任何一輪，信可能正�
 收件匣。實測同一個 6 小時窗口，加了只剩 2 封、不加是 24 封，被漏掉的正好是應徵回覆。
 
 拿到結果後，先照第 4 步判斷這一批，**把這批的 `important`、`todos` 與 `defer` 寫進
-`round.json`**（格式見第 6 步，記得帶上 `begin` 給你的 `roundToken`），然後回報
+`round.json`**（格式見第 6 步，記得帶上 `begin` 給你的 `roundToken`），然後用 Bash 工具回報
 
 ```
 ... statemachine.py step --lo <lo> --hi <hi> --count <這批回傳的封數>
@@ -540,7 +544,7 @@ Resume Workshop 今天 16:30 舉行」。那**是**待辦，因為出席是動�
 使用者的日曆才是他的行程系統。已經在日曆上的活動不需要待辦，重複列只是噪音。
 **待辦要抓的是缺漏**，也就是報名了卻沒進日曆的活動。
 
-判定為「已報名或已答應的活動」時，先跑
+判定為「已報名或已答應的活動」時，先用 Bash 工具跑
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_check.py" --summary "<信件主旨>" --date <YYYY-MM-DD>
@@ -877,7 +881,7 @@ token 不符會被當成讀取失敗而保留區間，那是安全方向；漏�
 `firstDeferredRound` **不要自己填**，腳本會保留最早的那一次。
 自己填會把等待時鐘歸零，讓「等太久就發待確認」永遠不觸發。
 
-然後跑 `... statemachine.py commit`。
+然後用 Bash 工具跑 `... statemachine.py commit`。
 
 `COMMITTED` 回傳的欄位，除了第 5 步用到的 `shouldAnnounceBacklog` 與
 第 1 步說明過的 `configStatus` / `configAlertStillOwed`，還有兩個要看
