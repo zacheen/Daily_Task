@@ -58,6 +58,12 @@ FIRST_RUN_LOOKBACK = 24 * 3600
 # Must exceed the longest gap between the four schedules, 8h15m from 22:10 to
 # 06:25, or every morning would report a stall.
 STALL_ALERT_SECONDS = 24 * 3600
+# begin and every step rewrite round-progress.json and commit deletes it, so a
+# recent write means a round is mid-flight. The longest gap seen between two
+# such writes in a completed round was 273 s. A round that dies mid-flight holds
+# every other begin off until this expires, so it has to stay far below the
+# hours between scheduled slots.
+LIVE_ROUND_SECONDS = 20 * 60
 JUDGE_WAIT_LIMIT_ROUNDS = 2
 # How many rounds a notice stays reviewable before it is swept into the archive,
 # where ARCHIVE_TTL disposes of it. One means "until the next round", which is
@@ -984,6 +990,20 @@ class Progress:
             "configSeen": self.config_seen})
 
     @staticmethod
+    def live_age(now: float) -> float | None:
+        """Seconds since a round still in flight last saved this file, or None.
+
+        A file dated in the future reads as not live. Failing open only brings
+        back the overlap State.save's rev check already survives, while failing
+        closed would hold every round off for as long as the clock is wrong.
+        """
+        try:
+            age = now - os.path.getmtime(PROGRESS_PATH)
+        except OSError:
+            return None
+        return age if 0 <= age < LIVE_ROUND_SECONDS else None
+
+    @staticmethod
     def clear() -> None:
         for path in (PROGRESS_PATH, ROUND_PATH):
             if os.path.exists(path):
@@ -1187,6 +1207,15 @@ def load_progress_or_abort() -> Progress | None:
 
 @abort_if_stale
 def cmd_begin(_args) -> int:
+    # Every task that missed its slot fires at once when the app reopens. The
+    # check comes before state is loaded, so the round that loses leaves nothing
+    # behind for the live one to trip over. Float time, because an int would
+    # truncate below the mtime of a file saved earlier in the same second and
+    # read it as dated in the future.
+    age = Progress.live_age(time.time())
+    if age is not None:
+        emit({"status": "ROUND_ALREADY_RUNNING", "ageSeconds": int(age)})
+        return 0
     now = int(time.time())
     state, first_run = load_or_abort(now)
     if state is None:

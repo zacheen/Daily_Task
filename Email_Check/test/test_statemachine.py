@@ -65,6 +65,10 @@ sm.STATE_PATH = os.path.join(work, "state.json")
 sm.ROUND_PATH = os.path.join(work, "round.json")
 sm.PROGRESS_PATH = os.path.join(work, "round-progress.json")
 sm.HERE = work
+# The scenarios below run rounds back to back within milliseconds, which the
+# live-round guard would read as overlap. Its own section turns it back on.
+LIVE_ROUND_REAL = sm.LIVE_ROUND_SECONDS
+sm.LIVE_ROUND_SECONDS = 0
 
 st = sm.State({"horizon": 100, "roundSeq": 5,
                "pendingJudge": [{"id": "a", "firstDeferredRound": 2}]})
@@ -1651,6 +1655,61 @@ out_quiet = stall_out[-1]
 check("so a silent mailbox never reads as a stall",
       "coverageStalled" not in out_quiet, out_quiet)
 sm.emit = _was_stall_emit
+
+# --- a catch-up begin backs off while another round is mid-flight ---
+# Every task that missed its slot fires at once when the app reopens. Only the
+# first begin may start a round, and the ones that lose must not touch anything
+# the live round is about to read.
+live_out = []
+_was_live_emit = sm.emit
+sm.emit = live_out.append
+sm.LIVE_ROUND_SECONDS = LIVE_ROUND_REAL
+
+
+def disk(path):
+    return open(path, encoding="utf-8").read() if os.path.exists(path) else None
+
+
+_clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH)
+sm.State({"horizon": NOW - 3600, "roundSeq": 50}).save()
+live_out.clear()
+check("the first catch-up begin starts a round", sm.cmd_begin(None) == 0
+      and live_out[-1]["status"] == "PROCEED", live_out[-1])
+json.dump({"roundToken": live_out[-1]["roundToken"], "todos": [{"id": "live"}]},
+          open(sm.ROUND_PATH, "w", encoding="utf-8"))
+held = (disk(sm.STATE_PATH), disk(sm.PROGRESS_PATH), disk(sm.ROUND_PATH))
+live_out.clear()
+rc = sm.cmd_begin(None)
+check("a second begin moments later backs off",
+      rc == 0 and live_out[-1]["status"] == "ROUND_ALREADY_RUNNING", live_out[-1])
+check("and leaves state, progress and findings exactly as the live round left them",
+      (disk(sm.STATE_PATH), disk(sm.PROGRESS_PATH), disk(sm.ROUND_PATH)) == held)
+
+old = _time.time() - LIVE_ROUND_REAL - 1
+os.utime(sm.PROGRESS_PATH, (old, old))
+live_out.clear()
+sm.cmd_begin(None)
+check("a round silent past the window is dead, so begin starts a new one",
+      live_out[-1]["status"] == "PROCEED", live_out[-1])
+check("and clears the dead round's findings as usual", not os.path.exists(sm.ROUND_PATH))
+
+ahead = _time.time() + 3600
+os.utime(sm.PROGRESS_PATH, (ahead, ahead))
+live_out.clear()
+sm.cmd_begin(None)
+check("a progress file dated in the future does not hold rounds off",
+      live_out[-1]["status"] == "PROCEED", live_out[-1])
+
+json.dump({"roundToken": live_out[-1]["roundToken"]},
+          open(sm.ROUND_PATH, "w", encoding="utf-8"))
+sm.cmd_commit(None)
+live_out.clear()
+sm.cmd_begin(None)
+check("a round started right after a commit is not blocked",
+      live_out[-1]["status"] == "PROCEED", live_out[-1])
+
+sm.LIVE_ROUND_SECONDS = 0
+sm.emit = _was_live_emit
 
 # --- corrupt state must abort, never invent a watermark ---
 open(sm.STATE_PATH, "w").write("{ not json")
