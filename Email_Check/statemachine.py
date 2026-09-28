@@ -1223,12 +1223,6 @@ def cmd_begin(_args) -> int:
 
     state.roundSeq += 1
     state.coverage.extend_to(now, BOUNDARY_SLACK)
-    # begin owns "a round starts here". Leaving a dead round's findings on disk
-    # would let this round's commit read them, and the only reason that is
-    # currently harmless is a delicate argument about every field being
-    # idempotent. Deleting it removes the argument.
-    if os.path.exists(ROUND_PATH):
-        os.unlink(ROUND_PATH)
     # Only the transition into a fault alerts, so a config left broken does not
     # push the same message four times a day. The status itself is reported
     # every round regardless, which is what keeps the fault visible in between.
@@ -1236,8 +1230,19 @@ def cmd_begin(_args) -> int:
     cfg["alert"] = (cfg["status"] != "present"
                     and cfg["status"] != state.lastConfigStatus)
     prog = Progress(now, config_seen=cfg["status"])
-    prog.save()
+    # state.json goes first so that the rev check stops a losing begin before it
+    # touches either round file. Two begins can both slip past the live-round
+    # guard, and when the round files were written first, the loser cleared the
+    # winner's round.json and left its own token in round-progress.json, so the
+    # winner's next step failed too.
     state.save()
+    # begin owns "a round starts here". Leaving a dead round's findings on disk
+    # would let this round's commit read them, and the only reason that is
+    # currently harmless is a delicate argument about every field being
+    # idempotent. Deleting it removes the argument.
+    if os.path.exists(ROUND_PATH):
+        os.unlink(ROUND_PATH)
+    prog.save()
 
     # cmd_step retires an interval by its query bounds, not by what it found, so
     # an empty mailbox advances the frontier exactly as a full one does. A

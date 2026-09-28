@@ -979,6 +979,28 @@ check("cmd_begin reports STATE_CHANGED_ABORT instead of raising", rc == 2, rc)
 sm.State.load_or_init = _real_load
 sm.State.save = _test_save          # back to the shim for anything after this
 
+# --- a begin that loses the rev race leaves the winner's round files alone ---
+# Two catch-up begins landing within milliseconds can both pass the live-round
+# guard, which the harness keeps off here. The loser has to be stopped before
+# it touches the files the winner reads next, or both rounds die.
+def round_files():
+    return tuple(open(p, encoding="utf-8").read() if os.path.exists(p) else None
+                 for p in (sm.PROGRESS_PATH, sm.ROUND_PATH))
+
+
+_clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH)
+sm.State({"horizon": 500, "roundSeq": 1}).save()
+loser_view, _ = _real_load(9999)
+sm.cmd_begin(None)
+json.dump({"todos": [{"id": "winner"}]}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+winner_files = round_files()
+sm.State.load_or_init = staticmethod(lambda now: (loser_view, False))
+rc = sm.cmd_begin(None)
+sm.State.load_or_init = _real_load
+check("the begin that read state before the winner saved aborts", rc == 2, rc)
+check("and leaves the winner's progress and findings untouched",
+      round_files() == winner_files, round_files())
+
 def _read_arch():
     if not os.path.exists(sm.ARCHIVE_PATH):
         return []
