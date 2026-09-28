@@ -733,7 +733,7 @@ addEventListener('pagehide', ()=>{
 def port_is_taken(host: str, port: int) -> bool:
     """Whether something already answers on the port.
 
-    A scheduled run launches this four times a day, so an already-open page
+    A scheduled run launches this many times a day, so an already-open page
     is normal, not an error. The check must happen before the browser is
     scheduled to open, or a second tab would open against a server this
     process will never own; the existing page already polls every 30s and

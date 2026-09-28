@@ -55,8 +55,8 @@ BOUNDARY_SLACK = 900
 # rather than as recently overdue. Mirrors the viewer's own constant.
 BARE_DEADLINE_LOOKBACK = 3
 FIRST_RUN_LOOKBACK = 24 * 3600
-# Must exceed the longest gap between the four schedules, 8h15m from 22:10 to
-# 06:25, or every morning would report a stall.
+# Must exceed the longest gap between scheduled slots, 8h30m overnight from
+# 22:20 to 06:50, or every morning would report a stall.
 STALL_ALERT_SECONDS = 24 * 3600
 # begin and every step rewrite round-progress.json and commit deletes it, so a
 # recent write means a round is mid-flight. The longest gap seen between two
@@ -389,8 +389,8 @@ class StaleStateError(Exception):
     """state.json changed under us, so this round's writes are not safe.
 
     Atomic replace stops a half-written file; it does nothing about one round
-    overwriting another's changes. Four tasks share this file and all four fire
-    together when the app reopens after being closed past several slots.
+    overwriting another's changes. Both scheduled tasks share this file and fire
+    together when the app reopens after being closed past their slots.
     """
 
 
@@ -1080,7 +1080,7 @@ def _read_findings(token: str | None = None) -> dict[str, Any]:
     retires the interval right after, so a false empty means the watermark
     moves past mail that was never recorded anywhere.
 
-    The token check is what stops four concurrent schedules from cross-talking
+    The token check is what stops concurrent schedules from cross-talking
     through one shared file. Another round overwriting round.json between this
     round's write and its step would otherwise attach its findings, or nothing
     at all, to an interval this round is about to retire.
@@ -1141,7 +1141,7 @@ def load_progress_or_abort() -> Progress | None:
     """The round file, or None after emitting the documented status code.
 
     Missing is not an exotic case: another task's commit calls Progress.clear(),
-    and the four scheduled tasks share this directory with no lock. Aborting is
+    and the scheduled tasks share this directory with no lock. Aborting is
     the only safe answer, because without the round token there is no way to
     tell whose findings round.json holds. It happens before coverage is
     touched, so the interval survives and the next round searches it again.
@@ -1172,8 +1172,8 @@ def cmd_begin(_args) -> int:
     state.roundSeq += 1
     state.coverage.extend_to(now, BOUNDARY_SLACK)
     # Only the transition into a fault alerts, so a config left broken does not
-    # push the same message four times a day. The status itself is reported
-    # every round regardless, which is what keeps the fault visible in between.
+    # repeatedly push the same message. The status itself is reported every
+    # round regardless, which is what keeps the fault visible in between.
     cfg = read_config()
     cfg["alert"] = (cfg["status"] != "present"
                     and cfg["status"] != state.lastConfigStatus)

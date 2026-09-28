@@ -606,8 +606,8 @@ check("an id-less defer does not multiply on replay",
       len(st28.pendingJudge) == 1, st28.pendingJudge)
 
 # --- config.json health: reported every round, alerts once per fault ---
-# A broken config is a persistent state and the task runs four times a day, so
-# alerting on the transition is what stops it becoming four identical pushes,
+# A broken config is a persistent state and the task runs many times a day, so
+# alerting on the transition is what stops it becoming a stream of identical pushes,
 # and reporting the status unconditionally is what keeps it visible in between.
 sm.CONFIG_PATH = os.path.join(work, "config.json")
 CFG = sm.CONFIG_PATH
@@ -875,8 +875,8 @@ check("reconcile stores a resolved deadline",
 
 # --- compare-and-swap on state.json ---
 # Atomic replace stops a half-written file; it does nothing about one round
-# overwriting another's changes. All four tasks fire together when the app
-# reopens after being closed past several slots.
+# overwriting another's changes. Both scheduled tasks fire together when the
+# app reopens after being closed past their slots.
 sm.State.save = _real_save          # these tests need the real guard
 
 if os.path.exists(sm.STATE_PATH):
@@ -1528,7 +1528,7 @@ check("thirty hours behind is a stall", out_bad["coverageStalled"] is True, out_
 check("and the message has the elapsed hours to show",
       out_bad["stalledHours"] == 30, out_bad["stalledHours"])
 
-out_edge = begin_stall(NOW - 8 * 3600 - 15 * 60)
+out_edge = begin_stall(NOW - 8 * 3600 - 30 * 60)
 check("the longest normal gap between schedules is not a stall",
       "coverageStalled" not in out_edge, out_edge)
 
