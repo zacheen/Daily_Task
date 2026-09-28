@@ -1825,6 +1825,68 @@ sm.WAIT_MAX_SECONDS = WAIT_REAL
 sm.LIVE_ROUND_SECONDS = 0
 sm.emit = _was_live_emit
 
+# --- the prompt gate skips only after a recent commit that left nothing owed ---
+# It runs before the model starts, so a wrong SKIP silently loses a check while
+# a wrong RUN only costs tokens. Every doubt has to come out as RUN.
+_clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH, sm.CONFIG_PATH)
+now = int(_time.time())
+check("a first run with no state is not skipped",
+      sm.gate_decision(now)["status"] == "RUN", sm.gate_decision(now))
+
+
+def gate_with(**fields):
+    sm.State({"horizon": now - 3600, "lastConfigStatus": "missing", **fields}).save()
+    return sm.gate_decision(now)
+
+
+check("a state that never recorded a commit is not skipped",
+      gate_with()["status"] == "RUN", gate_with())
+recent = gate_with(lastCommitAt=now - 60)
+check("a commit a minute ago skips", recent["status"] == "SKIP"
+      and recent["lastCommitAgeSeconds"] == 60, recent)
+check("a commit exactly 45 minutes ago no longer skips",
+      gate_with(lastCommitAt=now - 45 * 60)["status"] == "RUN")
+check("a commit dated in the future does not skip",
+      gate_with(lastCommitAt=now + 600)["status"] == "RUN")
+check("an owed notification is never skipped",
+      gate_with(lastCommitAt=now - 60, pendingNotify=[{"id": "p"}])["status"] == "RUN")
+check("an unscanned interval is never skipped",
+      gate_with(lastCommitAt=now - 60, intervals=[[now - 900, now]])["status"] == "RUN")
+check("a config alert still owed is never skipped",
+      gate_with(lastCommitAt=now - 60, lastConfigStatus="")["status"] == "RUN")
+
+gate_with(lastCommitAt=now - 60)
+before_gate = open(sm.STATE_PATH, encoding="utf-8").read()
+gate_out = []
+_was_gate_emit = sm.emit
+sm.emit = gate_out.append
+rc = sm.cmd_gate(None)
+check("cmd_gate reports the decision and leaves state.json untouched",
+      rc == 0 and gate_out[-1]["status"] == "SKIP"
+      and open(sm.STATE_PATH, encoding="utf-8").read() == before_gate, gate_out)
+
+_real_gate = sm.gate_decision
+sm.gate_decision = lambda now: 1 / 0
+gate_out.clear()
+sm.cmd_gate(None)
+sm.gate_decision = _real_gate
+check("a gate that crashes answers RUN", gate_out[-1]["status"] == "RUN", gate_out)
+sm.emit = _was_gate_emit
+
+open(sm.STATE_PATH, "w").write("{ not json")
+check("an unreadable state is not skipped", sm.gate_decision(now)["status"] == "RUN")
+
+_clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH)
+sm.State({"horizon": now - 3600}).save()
+sm.Progress(now).save()
+json.dump({}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+sm.emit = lambda payload: None
+sm.cmd_commit(None)
+sm.emit = _was_gate_emit
+stamped = json.load(open(sm.STATE_PATH, encoding="utf-8")).get("lastCommitAt", 0)
+check("a successful commit records when it happened",
+      now <= stamped <= int(_time.time()), stamped)
+
 # --- corrupt state must abort, never invent a watermark ---
 open(sm.STATE_PATH, "w").write("{ not json")
 try:

@@ -8,6 +8,7 @@
 | 誰 | 負責什麼 |
 |---|---|
 | `statemachine.py` | 時間窗、區間覆蓋、水位、去重佇列、原子寫檔 |
+| `shared/gmail-gate-hook.ps1` 加 `statemachine.py gate` | 在模型開始之前決定這一輪要不要直接跳過，見「跳過的判斷在模型開始之前做」 |
 | 你（LLM） | 呼叫 Gmail MCP、**判斷重要性**、寫推播文字 |
 
 **凡是腳本告訴你的事，照做，不要自己重算。**
@@ -68,6 +69,8 @@ allowlist 是逐字比對的，**不在上面的命令會停在權限提示，�
 | `calendar_check.py` | 第 4 步 |
 | `notify.ps1` | 第 5 步 |
 | `open-task-list.ps1` | 第 7 步 |
+
+`statemachine.py gate` 不在這張表上，因為它是 hook 在你開始之前替你跑的，你讀得到這份文件就代表它已經回了照跑。**不要自己再跑一次。**
 
 **不要為了省 token 自己拼一行命令去翻檔案。** 這是真的發生過的故障。
 有一輪讀完內文、正要寫 `round.json` 之前，跑了一行
@@ -155,7 +158,26 @@ SKILL.md 裡，位置在使用者家目錄的 `.claude/scheduled-tasks/` 底下�
 以後新增任何工具呼叫或命令，**必須同時加進 allowlist**。
 沒做的話互動測試看起來正常，排程執行時會靜默卡住。
 
+### 跳過的判斷在模型開始之前做
+
+專案的 `.claude/settings.local.json` 除了權限，還有一段 `hooks.UserPromptSubmit`，命令是 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:/dont_move/git_save/Daily_Task/shared/gmail-gate-hook.ps1"`，逾時 60 秒。重建那個檔的時候這一段也要補回去。它只放專案層，不鏡射到使用者層，因為兩層都放會讓同一個提示被檢查兩次，而且這一段不見時的下場只是每一輪都照跑，不會漏掉任何一次檢查。
+
+這支 hook 只對開頭是 `<scheduled-task name="gmail-check-` 的提示動作，那是桌面 app 排程自己包在提示外面的標記，其餘提示在啟動 Python 之前就放行。對上標記才跑 `statemachine.py gate`，回 `SKIP` 就擋下提示，這一輪在模型開始之前就結束，一個 token 都不花。`gate` 回 `SKIP` 的條件是以下全部成立，其餘任何情況一律照跑，包括 hook 本身出錯或逾時。
+
+- 上一次成功的 `commit` 在 45 分鐘內，時間也不在未來
+- `pendingNotify` 是空的，沒有欠著的通知
+- `coverage.intervals` 是空的，沒有沒掃完的區間
+- 沒有欠著的 config 警示
+- `state.json` 讀得出來
+
+正在跑的另一輪**刻意不算**跳過的理由。被它擋下的那一輪要走到 `begin` 與 `wait`，前一輪死掉時才有人接手。
+
+之所以放在模型開始之前，是因為在 session 裡判斷太貴。2026-09-27 量過一輪讀完這份文件、跑完 `begin` 與 `wait` 才結束的跳過，寫入快取 60,219、讀取 234,470，將近一整輪的成本，其中約 23k 是 session 開頭本身、約 37k 是這份文件。
+
+同日實測的結果如下。桌面 app 的排程確實會觸發專案層的 `UserPromptSubmit`，派送後約 5 秒就收到。在一輪提交之後立刻手動觸發另一個任務，那一輪被擋下，0 turns、5 秒結束，Runs 面板照樣記成 `succeeded`，這與 `Known_concern.md` 第 1 條一致。無頭模式另外確認了擋下時輸入與快取 token 都是 0，以及 hook 逾時的時候提示會照常送出。代價是這個專案裡每一個互動提示都要多等 PowerShell 啟動，約 0.7 秒，對上標記的排程提示則因為 `conda run` 要約 5 秒。
+
 ## 流程
+
 
 ### 腳本回傳的 status 一覽
 

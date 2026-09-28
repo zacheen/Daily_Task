@@ -69,6 +69,9 @@ LIVE_ROUND_SECONDS = 20 * 60
 # again until the live round commits or goes silent past LIVE_ROUND_SECONDS.
 WAIT_MAX_SECONDS = 90
 WAIT_POLL_SECONDS = 10
+# A round that committed this recently has already covered the mailbox. With
+# slots 30 minutes apart, 45 minutes skips every other one.
+RECENT_COMMIT_SECONDS = 45 * 60
 JUDGE_WAIT_LIMIT_ROUNDS = 2
 # How many rounds a notice stays reviewable before it is swept into the archive,
 # where ARCHIVE_TTL disposes of it. One means "until the next round", which is
@@ -492,6 +495,9 @@ class State:
         # Empty means never observed, so a first run with a broken config still
         # alerts instead of comparing equal to some assumed-healthy default.
         self.lastConfigStatus: str = str(data.get("lastConfigStatus", ""))
+        # Written only by a commit that succeeded. 0 means none recorded, which
+        # the gate reads as "run".
+        self.lastCommitAt: int = int(data.get("lastCommitAt", 0))
 
     @classmethod
     def load_or_init(cls, now: int) -> tuple["State", bool]:
@@ -553,6 +559,7 @@ class State:
             "roundSeq": self.roundSeq,
             "lastBacklogNoticeRound": self.lastBacklogNoticeRound,
             "lastConfigStatus": self.lastConfigStatus,
+            "lastCommitAt": self.lastCommitAt,
             "rev": self.rev,
         }
         _atomic_json(STATE_PATH, payload)
@@ -1186,8 +1193,8 @@ def abort_if_stale(fn):
 
 def load_or_abort(now: int) -> tuple[State | None, bool]:
     """A corrupt state file must produce the documented status code for a cold
-    reader, never a traceback. begin, step and commit share this contract, and
-    wait never loads state."""
+    reader, never a traceback. begin, step and commit share this contract. wait
+    never loads state, and gate answers RUN instead of aborting."""
     try:
         return State.load_or_init(now)
     except StateError as exc:
@@ -1303,6 +1310,48 @@ def cmd_wait(_args, sleep=time.sleep) -> int:
             emit({"status": "STILL_RUNNING", "ageSeconds": int(age)})
             return 0
         sleep(WAIT_POLL_SECONDS)
+
+
+def gate_decision(now: int) -> dict[str, Any]:
+    """SKIP only when a recent commit left nothing owed, RUN otherwise.
+
+    A live round is deliberately not a reason to skip. The round it would turn
+    away has to reach begin and wait, or nobody takes over if the live one dies.
+    """
+    try:
+        state, first_run = State.load_or_init(now)
+    except StateError:
+        return {"status": "RUN", "reason": "state unreadable"}
+    if first_run:
+        return {"status": "RUN", "reason": "no state yet"}
+    age = now - state.lastCommitAt
+    if not state.lastCommitAt or not 0 <= age < RECENT_COMMIT_SECONDS:
+        return {"status": "RUN", "reason": "no recent commit"}
+    if state.pendingNotify:
+        return {"status": "RUN", "reason": "notification owed"}
+    # A round stops after MAX_SEARCHES_PER_ROUND, so a big backlog can outlive
+    # the commit that ended it.
+    if state.coverage.intervals:
+        return {"status": "RUN", "reason": "unscanned intervals"}
+    config_status = read_config()["status"]
+    if config_status != "present" and config_status != state.lastConfigStatus:
+        return {"status": "RUN", "reason": "config alert owed"}
+    return {"status": "SKIP", "lastCommitAgeSeconds": age}
+
+
+def cmd_gate(_args) -> int:
+    """Whether a scheduled run can stop before the model reads anything.
+
+    Called by shared/gmail-gate-hook.ps1, never by a round. Reads only. Any
+    failure answers RUN, because a wrong skip costs a check and a wrong run
+    costs only tokens.
+    """
+    try:
+        decision = gate_decision(int(time.time()))
+    except Exception as exc:
+        decision = {"status": "RUN", "reason": f"gate failed: {exc}"}
+    emit(decision)
+    return 0
 
 
 @abort_if_stale
@@ -1450,6 +1499,7 @@ def cmd_commit(_args) -> int:
     if healed or (acked and not drifted):
         state.lastConfigStatus = config_status
 
+    state.lastCommitAt = now
     state.save()
     Progress.clear()
     emit({"status": "COMMITTED",
@@ -1489,6 +1539,7 @@ def main(argv: list[str]) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("begin").set_defaults(func=cmd_begin)
     sub.add_parser("wait").set_defaults(func=cmd_wait)
+    sub.add_parser("gate").set_defaults(func=cmd_gate)
 
     sp = sub.add_parser("step")
     sp.add_argument("--lo", type=int, default=0)
