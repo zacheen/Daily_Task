@@ -64,6 +64,11 @@ STALL_ALERT_SECONDS = 24 * 3600
 # every other begin off until this expires, so it has to stay far below the
 # hours between scheduled slots.
 LIVE_ROUND_SECONDS = 20 * 60
+# One wait call has to finish inside the Bash and PowerShell tools' default
+# two-minute timeout with room left for conda's startup. The round calls it
+# again until the live round commits or goes silent past LIVE_ROUND_SECONDS.
+WAIT_MAX_SECONDS = 90
+WAIT_POLL_SECONDS = 10
 JUDGE_WAIT_LIMIT_ROUNDS = 2
 # How many rounds a notice stays reviewable before it is swept into the archive,
 # where ARCHIVE_TTL disposes of it. One means "until the next round", which is
@@ -1181,7 +1186,8 @@ def abort_if_stale(fn):
 
 def load_or_abort(now: int) -> tuple[State | None, bool]:
     """A corrupt state file must produce the documented status code for a cold
-    reader, never a traceback. All three subcommands share this contract."""
+    reader, never a traceback. begin, step and commit share this contract, and
+    wait never loads state."""
     try:
         return State.load_or_init(now)
     except StateError as exc:
@@ -1274,6 +1280,29 @@ def cmd_begin(_args) -> int:
     out["nextQuery"] = plan_query(state, prog)
     emit(out)
     return 0
+
+
+def cmd_wait(_args, sleep=time.sleep) -> int:
+    """What a round turned away by ROUND_ALREADY_RUNNING does instead of leaving.
+
+    Leaving at once meant a live round that then died took the whole catch-up
+    with it, since every other round had already gone. Waiting lets one of them
+    take over once the dead round's file expires. A round that re-ran its own
+    begin lands here too and takes over from itself the same way. Reads only, so
+    any number of waiting rounds can poll the same file.
+    """
+    deadline = time.time() + WAIT_MAX_SECONDS
+    while True:
+        age = Progress.live_age(time.time())
+        if age is None:
+            # Only commit deletes the file, so a missing one means the live
+            # round finished and already covered this round's window.
+            emit({"status": "TAKE_OVER" if os.path.exists(PROGRESS_PATH) else "COVERED"})
+            return 0
+        if time.time() >= deadline:
+            emit({"status": "STILL_RUNNING", "ageSeconds": int(age)})
+            return 0
+        sleep(WAIT_POLL_SECONDS)
 
 
 @abort_if_stale
@@ -1459,6 +1488,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Gmail check state machine")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("begin").set_defaults(func=cmd_begin)
+    sub.add_parser("wait").set_defaults(func=cmd_wait)
 
     sp = sub.add_parser("step")
     sp.add_argument("--lo", type=int, default=0)

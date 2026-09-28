@@ -1730,6 +1730,98 @@ sm.cmd_begin(None)
 check("a round started right after a commit is not blocked",
       live_out[-1]["status"] == "PROCEED", live_out[-1])
 
+# --- a round turned away waits instead of leaving, and takes over a dead one ---
+# Leaving at once let one live round that then died cost the whole catch-up,
+# because every other round had already gone.
+WAIT_REAL = sm.WAIT_MAX_SECONDS
+
+
+def age_progress(seconds):
+    t = _time.time() - seconds
+    os.utime(sm.PROGRESS_PATH, (t, t))
+
+
+def wait_with(on_sleep):
+    """cmd_wait with a sleep that changes the world instead of passing time.
+
+    Raises after a few polls, so a wait that never notices the change fails
+    fast instead of spinning out the real WAIT_MAX_SECONDS.
+    """
+    calls = []
+
+    def fake(seconds):
+        calls.append(seconds)
+        if len(calls) > 3:
+            raise RuntimeError("wait never noticed the change")
+        on_sleep()
+    live_out.clear()
+    try:
+        sm.cmd_wait(None, sleep=fake)
+    except RuntimeError as exc:
+        return {"status": str(exc)}, calls
+    return live_out[-1], calls
+
+
+def begin_winner():
+    _clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH)
+    sm.State({"horizon": NOW - 3600, "roundSeq": 60}).save()
+    live_out.clear()
+    sm.cmd_begin(None)
+    token = live_out[-1]["roundToken"]
+    json.dump({"roundToken": token}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+    return token
+
+
+def commit_winner():
+    sm.cmd_commit(None)
+
+
+begin_winner()
+held = (disk(sm.STATE_PATH), disk(sm.PROGRESS_PATH), disk(sm.ROUND_PATH))
+sm.WAIT_MAX_SECONDS = 0
+live_out.clear()
+check("wait reports a live round as still running",
+      sm.cmd_wait(None) == 0 and live_out[-1]["status"] == "STILL_RUNNING"
+      and "ageSeconds" in live_out[-1], live_out[-1])
+check("and waiting writes nothing the live round reads",
+      (disk(sm.STATE_PATH), disk(sm.PROGRESS_PATH), disk(sm.ROUND_PATH)) == held)
+
+sm.WAIT_MAX_SECONDS = WAIT_REAL
+out, calls = wait_with(commit_winner)
+check("a commit during the wait ends it as covered", out["status"] == "COVERED", out)
+check("after sleeping one poll interval", calls == [sm.WAIT_POLL_SECONDS], calls)
+
+sm.WAIT_MAX_SECONDS = 0
+live_out.clear()
+sm.cmd_wait(None)
+check("with the live round already committed there is nothing to wait for",
+      live_out[-1]["status"] == "COVERED", live_out[-1])
+
+# The same path covers a round that re-ran its own begin, taking over from
+# itself instead of abandoning the round.
+begin_winner()
+seq_before = json.load(open(sm.STATE_PATH, encoding="utf-8"))["roundSeq"]
+sm.WAIT_MAX_SECONDS = WAIT_REAL
+out, _ = wait_with(lambda: age_progress(LIVE_ROUND_REAL + 1))
+check("a live round that goes silent past the window is taken over",
+      out["status"] == "TAKE_OVER", out)
+live_out.clear()
+sm.cmd_begin(None)
+check("and the waiting round's begin then starts a round of its own",
+      live_out[-1]["status"] == "PROCEED"
+      and json.load(open(sm.STATE_PATH, encoding="utf-8"))["roundSeq"] == seq_before + 1,
+      live_out[-1])
+
+begin_winner()
+ahead = _time.time() + 3600
+os.utime(sm.PROGRESS_PATH, (ahead, ahead))
+sm.WAIT_MAX_SECONDS = 0
+live_out.clear()
+sm.cmd_wait(None)
+check("a future-dated progress file is taken over, matching begin's guard",
+      live_out[-1]["status"] == "TAKE_OVER", live_out[-1])
+
+sm.WAIT_MAX_SECONDS = WAIT_REAL
 sm.LIVE_ROUND_SECONDS = 0
 sm.emit = _was_live_emit
 

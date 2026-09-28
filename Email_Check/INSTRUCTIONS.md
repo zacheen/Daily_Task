@@ -64,7 +64,7 @@ allowlist 是逐字比對的，**不在上面的命令會停在權限提示，�
 
 | 命令 | 在哪一步 |
 |---|---|
-| `statemachine.py` 的 `begin` / `step` / `commit` | 第 1、3、6 步 |
+| `statemachine.py` 的 `begin` / `wait` / `step` / `commit` | 第 1、3、6 步 |
 | `calendar_check.py` | 第 4 步 |
 | `notify.ps1` | 第 5 步 |
 | `open-task-list.ps1` | 第 7 步 |
@@ -159,20 +159,23 @@ SKILL.md 裡，位置在使用者家目錄的 `.claude/scheduled-tasks/` 底下�
 
 ### 腳本回傳的 status 一覽
 
-三個子命令共用這張表。**表上沒有的 status 一律當成異常**，推播告知後結束，不要猜。
+四個子命令共用這張表。**表上沒有的 status 一律當成異常**，推播告知後結束，不要猜。
 
 | `status` | 子命令 | 意思 | 你要做什麼 |
 |---|---|---|---|
 | `PROCEED` | begin | 正常開始 | 照第 1 步繼續 |
-| `ROUND_ALREADY_RUNNING` | begin | 另一輪 20 分鐘內還寫過進度，正在跑 | **這輪安靜結束。** 不要重跑 `begin`、不要碰 Gmail、不要推播 |
+| `ROUND_ALREADY_RUNNING` | begin | 另一輪 20 分鐘內還寫過進度，正在跑 | **改跑 `wait`**（見表格下方），不要碰 Gmail、不要推播 |
+| `STILL_RUNNING` | wait | 那一輪還在跑，這次等滿了 | **再跑一次 `wait`** |
+| `COVERED` | wait | 那一輪已經提交，這段時間它掃過了 | **這輪安靜結束。** 不要重跑 `begin`、不要推播 |
+| `TAKE_OVER` | wait | 那一輪超過 20 分鐘沒寫進度，當成已經死了 | **回第 1 步重跑 `begin`**，由這輪接手 |
 | `SEARCH` | step | 還有區間要掃 | 拿新的 `nextQuery` 回第 3 步開頭 |
 | `DONE` | step | 這輪搜尋掃完了 | 進第 4 步 |
 | `SEARCH_FAILED` | step | 你回報了搜尋失敗，區間留給下一輪 | **第 2 步已判定為重要的欠帳照樣推播**，不要因為新信搜尋失敗就把已確認的重要信吞掉 |
 | `COMMITTED` | commit | 這輪已經原子提交 | 讀它的欄位收尾（見第 6、7 步），這輪結束 |
-| `ABORT_STATE_CORRUPT` | 三者皆可 | `state.json` 壞了 | **推播告知後結束。不要碰 Gmail，不要試著修狀態檔** |
+| `ABORT_STATE_CORRUPT` | begin / step / commit | `state.json` 壞了 | **推播告知後結束。不要碰 Gmail，不要試著修狀態檔** |
 | `NO_ROUND_IN_PROGRESS` | step / commit | 這輪的 `round-progress.json` 不見了或讀不出來 | **這輪放棄，安靜結束。** 不要重跑 `begin`，不要推播 |
 | `FINDINGS_UNREADABLE` | step / commit | `round.json` 讀不出來，或 `roundToken` 不屬於這輪 | **這輪放棄，安靜結束。** 不要重試同一個 `step`，更不要當成 `DONE` |
-| `STATE_CHANGED_ABORT` | 三者皆可 | 另一輪在這輪讀完狀態之後寫了 `state.json`，這輪的寫入被擋下來了 | **這輪放棄，安靜結束。** 不要重跑、不要推播 |
+| `STATE_CHANGED_ABORT` | begin / step / commit | 另一輪在這輪讀完狀態之後寫了 `state.json`，這輪的寫入被擋下來了 | **這輪放棄，安靜結束。** 不要重跑、不要推播 |
 
 後三者為什麼可以安靜放棄，而不是漏信。區間**刻意沒有**被退休，所以下一輪會重新掃
 同一段時間；而這輪較早幾批已經判定為重要的信，在它們各自的 `step` 當下就已經寫進
@@ -187,7 +190,15 @@ SKILL.md 裡，位置在使用者家目錄的 `.claude/scheduled-tasks/` 底下�
 `NO_ROUND_IN_PROGRESS` 最常見的成因不是壞檔，是另一個排程任務的 `commit`
 把共用的 `round-progress.json` 清掉了。那代表有別人正在處理，你安靜退出才對。
 
-`ROUND_ALREADY_RUNNING` 是給關機後補跑用的。錯過時段的任務會在 app 重開時同時觸發，但任何一輪都會掃完上一輪之後的整段時間，所以只要一輪就夠了。第一個跑 `begin` 的那輪照常進行，其餘的在 `begin` 就收到這個 status，這時候腳本什麼都還沒寫，所以你直接結束，不會留下任何東西讓正在跑的那輪踩到。判斷依據是 `round-progress.json` 最後一次被寫入的時間，`begin` 與每一個 `step` 都會寫它，`commit` 會刪掉它。一輪如果在 `begin` 之後死掉，它的進度檔會把後來的 `begin` 擋 20 分鐘，之後才被當成死掉的一輪。排程時段之間隔好幾個小時，所以受影響的只有同時補跑的那幾輪，以及死掉之後 20 分鐘內手動按的「立即執行」。
+`ROUND_ALREADY_RUNNING` 是給關機後補跑用的。錯過時段的任務會在 app 重開時同時觸發，但任何一輪都會掃完上一輪之後的整段時間，所以只要一輪就夠了。第一個跑 `begin` 的那輪照常進行，其餘的在 `begin` 就收到這個 status，這時候腳本什麼都還沒寫。**收到它不要直接結束，改跑下面這行等那一輪的結果。** 用 Bash 工具跑，一次最多等 90 秒。
+
+```
+conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" wait
+```
+
+回 `STILL_RUNNING` 就再跑一次同一行。回 `COVERED` 代表那一輪已經提交，這段時間它掃過了，這輪安靜結束。回 `TAKE_OVER` 代表那一輪超過 20 分鐘沒寫進度，當成已經死了，這時回第 1 步重跑 `begin` 由這輪接手。`wait` 只讀不寫，幾輪同時等也不會互相干擾。接手時如果兩輪同時重跑 `begin`，其中一輪會再收到 `ROUND_ALREADY_RUNNING`，照樣再等。
+
+判斷依據是 `round-progress.json` 最後一次被寫入的時間，`begin` 與每一個 `step` 都會寫它，`commit` 會刪掉它。以前收到這個 status 是直接結束，結果第一輪要是中途死掉，整批補跑都白費，因為其他輪早就走了。同一輪不小心重跑了自己的 `begin` 也會收到這個 status，照樣改跑 `wait`，等自己的進度檔過期後接手，不會整輪作廢。代價是其他輪要等第一輪跑完才結束，第一輪死掉時最多要等 20 分鐘才有人接手。排程時段之間隔好幾個小時，所以會進到這條路的只有同時補跑的那幾輪，以及另一輪還在跑時手動按的「立即執行」。
 
 
 ### 1. begin
@@ -321,7 +332,7 @@ Gmail 檢查已經 <stalledHours> 小時沒有跑完任何一輪，信可能正�
 搜尋報錯或逾時就重試一次，仍然失敗改成回報 `... statemachine.py step --failed`。
 
 `step` 的 `status` 一律查開頭那張總表，**這裡同樣不重列**，理由同第 1 步。
-表上標了「step」或「三者皆可」的每一種它都可能回。
+表上子命令欄含 step 的每一種它都可能回。
 
 `stuck` 不是空的時候，代表有超過 40 封信擠在同一秒、無法再二分。
 推播要寫「舊信追趕卡住 需人工處理」，因為那不會自己好。
@@ -1072,7 +1083,7 @@ powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-ta
 殘餘窗口與代價寫在下面「已知限制」。
 
 ## 已知限制
-四個排程任務共用同一份狀態，指令層面無法上鎖。app 關機後錯過時段的任務會同時補跑，這種情況現在由 `begin` 回的 `ROUND_ALREADY_RUNNING` 擋掉，只有第一輪會真的開始。擋不住的是兩輪的 `begin` 落在同一個幾毫秒的窗口裡，也就是一輪做完檢查、還沒寫出進度檔之前，另一輪也做完了檢查。那時兩輪都會往下走，但 `begin` 先寫 `state.json` 才碰 `round.json` 與進度檔，所以兩輪都在對方存檔之前讀到狀態的話，後寫的那輪收到 `STATE_CHANGED_ABORT` 就停，完全不會動到先到那輪的兩個 round 檔，先到那輪照常跑完。2026-09-27 以前是先寫 round 檔，輸的那輪會連帶把先到那輪的 token 蓋掉，兩輪一起死。還剩一個更窄的順序擋不住，後到那輪剛好在先到那輪寫完 `state.json`、還沒寫出進度檔的那幾微秒裡讀狀態，這時兩輪都寫得進 state，接著互相蓋掉 round 檔。那跟下面那段 rev 檢查的殘餘窗口屬於同一類，機率極低，後果也同樣不能保證只是重複通知。
+四個排程任務共用同一份狀態，指令層面無法上鎖。app 關機後錯過時段的任務會同時補跑，這種情況現在由 `begin` 回的 `ROUND_ALREADY_RUNNING` 擋掉，只有第一輪會真的開始，其餘的改跑 `wait` 等它結束，它死掉的話由其中一輪接手。擋不住的是兩輪的 `begin` 落在同一個幾毫秒的窗口裡，也就是一輪做完檢查、還沒寫出進度檔之前，另一輪也做完了檢查。那時兩輪都會往下走，但 `begin` 先寫 `state.json` 才碰 `round.json` 與進度檔，所以兩輪都在對方存檔之前讀到狀態的話，後寫的那輪收到 `STATE_CHANGED_ABORT` 就停，完全不會動到先到那輪的兩個 round 檔，先到那輪照常跑完。2026-09-27 以前是先寫 round 檔，輸的那輪會連帶把先到那輪的 token 蓋掉，兩輪一起死。還剩一個更窄的順序擋不住，後到那輪剛好在先到那輪寫完 `state.json`、還沒寫出進度檔的那幾微秒裡讀狀態，這時兩輪都寫得進 state，接著互相蓋掉 round 檔。那跟下面那段 rev 檢查的殘餘窗口屬於同一類，機率極低，後果也同樣不能保證只是重複通知。
 
 **「整輪放棄」指的是中止的那一次呼叫，不是那一輪做過的每一件事。**
 先前每一個成功的 `step` 都已經把自己那批 findings 連同區間退休原子存檔了，
