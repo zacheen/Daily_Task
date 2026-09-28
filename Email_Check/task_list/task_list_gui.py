@@ -14,10 +14,12 @@ files and nothing else, and only ever reads `state.json` and the archive.
 statemachine.py is the reverse. With one writer per file plus atomic replace, a
 reader always sees a complete old or complete new file and no lock is needed.
 
-Each request file is one verb the user can aim at a row. A tick says done, a
-restore says un-archive that, a promote says the notified mail in 重要事項 is
-really a todo. None of them takes effect until the next scheduled round reads
-it, which is why every button says 已排定 rather than claiming it is finished.
+Each request file is one verb the user can aim at a row. A tick says done, and
+待分類's 封存 is the same tick. A restore says un-archive that. A triage says
+file this todo under a level, or send it back to 待分類. None of them takes
+effect until the next scheduled round reads it, which is why every button
+says 已排定 rather than claiming it is finished. A queued level shows at once
+anyway, since the row has to move to the section it now belongs in.
 
 A tick is persisted on the request that carries it, not on window close, so
 killing the process cannot lose one. The page reports per-row save state
@@ -49,7 +51,10 @@ STATE_PATH = os.path.join(os.path.dirname(HERE), "state.json")
 CHECKED_PATH = os.path.join(HERE, "tasks-checked.json")
 ARCHIVE_PATH = os.path.join(HERE, "tasks-archive.json")
 RESTORE_PATH = os.path.join(HERE, "tasks-restore.json")
-PROMOTE_PATH = os.path.join(HERE, "tasks-promote.json")
+TRIAGE_PATH = os.path.join(HERE, "tasks-triage.json")
+# Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
+# order of 待辦清單. A todo with none of these is 待分類.
+PRIORITIES = ("urgent", "important", "normal")
 # Mirrors ARCHIVE_TTL in statemachine.py, for showing days remaining.
 ARCHIVE_TTL_DAYS = 3
 HOST, PORT = "127.0.0.1", 8765
@@ -158,37 +163,27 @@ def load_checked() -> set[str]:
     return {str(x) for x in _read_json(CHECKED_PATH, {}).get("checkedIds", [])}
 
 
-def load_promotes() -> set[str]:
-    return {str(x) for x in _read_json(PROMOTE_PATH, {}).get("promoteIds", [])}
+def load_triage() -> dict[str, str]:
+    levels = _read_json(TRIAGE_PATH, {}).get("levels", {})
+    return {str(k): str(v) for k, v in levels.items()} if isinstance(levels, dict) else {}
 
 
-def reviewable_notices(todos: list[dict], notices: list[dict]) -> list[dict]:
-    """The notices 重要事項 may show: pushed mail with no todo of its own.
-
-    A message the todo list already carries is dropped rather than listed
-    twice, and its 加到待辦 button would be dead anyway since the state machine
-    skips promoting a live duplicate.
-
-    record_notices now keeps both queues disjoint, so this only ever fires on
-    state.json written before that rule, or hand-edited. It stays because this
-    is the one place the rule is visible to the user.
-
-    An id-less notice is kept: it can be matched against no todo at all.
-    """
-    owned = {k for k in (_usable_id(t) for t in todos if isinstance(t, dict))
-             if k is not None}
-    return [n for n in notices
-            if isinstance(n, dict) and _usable_id(n) not in owned]
-
-
-def prune_requests(live_ids: set[str],
-                   notice_ids: set[str]) -> tuple[set[str], set[str]]:
-    """Drop requests whose target is gone. Returns the ticks and promotes left.
+def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str]]:
+    """Drop requests that are done or aimed at nothing. Returns the ticks and
+    levels left.
 
     All three request files need this: each would otherwise grow forever, and a
-    message id reused by a future todo, archive entry or notice would arrive
-    already ticked, already flagged for restore, or already promoted.
+    message id reused by a future todo or archive entry would arrive already
+    ticked, already flagged for restore, or already filed.
+
+    A level is dropped once state.json carries it, which is how the page stops
+    showing it as 已排定. Nothing is dropped before that, so a click the round
+    has not read yet cannot be lost here.
     """
+    rows = [t for t in todos if isinstance(t, dict) and _usable_id(t)]
+    live_ids = {_usable_id(t) for t in rows}
+    stored = {_usable_id(t): str(t.get("priority") or "") for t in rows}
+
     archived_ids = {_usable_id(a) for a in _read_json(ARCHIVE_PATH, {}).get("archived", [])
                     if isinstance(a, dict)}
     wanted = load_restores()
@@ -197,23 +192,17 @@ def prune_requests(live_ids: set[str],
         _atomic_write(RESTORE_PATH,
                       {"restoreIds": sorted(live_restores), "rev": _next_rev()})
 
-    # A promote is dropped once its notice leaves state.json, whether that was
-    # this promotion landing or the round sweeping the notice into the archive.
-    # A click in the milliseconds between the round reading this file and
-    # sweeping is therefore lost, and the item shows up in 已封存 instead; 復原
-    # is the way back. /api/promote rejects the same click once the sweep is
-    # visible, which is what keeps the window that small.
-    promotes = load_promotes()
-    live_promotes = promotes & notice_ids
-    if live_promotes != promotes:
-        _atomic_write(PROMOTE_PATH,
-                      {"promoteIds": sorted(live_promotes), "rev": _next_rev()})
+    levels = load_triage()
+    live_levels = {tid: lvl for tid, lvl in levels.items()
+                   if tid in live_ids and stored[tid] != lvl}
+    if live_levels != levels:
+        _atomic_write(TRIAGE_PATH, {"levels": live_levels, "rev": _next_rev()})
 
     checked = load_checked()
     pruned = checked & live_ids
     if pruned != checked:
         _atomic_write(CHECKED_PATH, {"checkedIds": sorted(pruned), "rev": _next_rev()})
-    return pruned, live_promotes
+    return pruned, live_levels
 
 
 def _usable_id(item: dict) -> str | None:
@@ -329,33 +318,31 @@ def api_restore():
     return jsonify({"ok": True, "id": tid, "pending": True})
 
 
-@app.post("/api/promote")
-def api_promote():
-    """Queue "this notice is a todo". The state machine adds it next commit.
+@app.post("/api/triage")
+def api_triage():
+    """Queue a level for a todo, or "" to send it back to 待分類.
 
     Same shape as /api/restore, a GUI-owned request file rather than a write to
-    state.json, so that file keeps exactly one writer.
+    state.json, so that file keeps exactly one writer. The state machine
+    applies it on its next commit.
     """
     body = request.get_json(silent=True) or {}
     tid = str(body.get("id", "")).strip()
+    level = str(body.get("level", "")).strip()
     if not tid:
         return jsonify({"ok": False, "error": "missing id"}), 400
+    if level and level not in PRIORITIES:
+        return jsonify({"ok": False, "error": "unknown level"}), 400
     with _lock:
-        state = _read_json(STATE_PATH, {})
-        notices = state.get("notices", [])
-        if not isinstance(notices, list):
-            return jsonify({"ok": False, "error": "state unreadable"}), 409
-        shown = reviewable_notices(state.get("todos", []), notices)
-        if tid not in {_usable_id(n) for n in shown}:
-            # Swept into the archive by a round that ran while this tab was
-            # open, or already on the todo list. Saying so beats queueing a
-            # request nothing will consume; 復原 in 已封存 is the way back from
-            # the archive, and a promote for a live todo is a no-op.
+        live = {k for k in (_usable_id(t) for t in load_todos()) if k}
+        if tid not in live:
+            # Archived by a round that ran while this tab was open. Saying so
+            # beats queueing a request nothing will consume.
             return jsonify({"ok": False, "error": "gone", "gone": True}), 409
-        wanted = load_promotes()
-        wanted.add(tid)
-        _atomic_write(PROMOTE_PATH, {"promoteIds": sorted(wanted), "rev": _next_rev()})
-    return jsonify({"ok": True, "id": tid, "pending": True})
+        levels = load_triage()
+        levels[tid] = level
+        _atomic_write(TRIAGE_PATH, {"levels": levels, "rev": _next_rev()})
+    return jsonify({"ok": True, "id": tid, "level": level, "pending": True})
 
 
 @app.get("/api/todos")
@@ -363,18 +350,15 @@ def api_todos():
     _touch(request.args.get("cid", ""))
     with _lock:
         state = _read_json(STATE_PATH, {})
-        todos = state.get("todos", [])
-        notices = reviewable_notices(todos, state.get("notices", []))
-        live = {k for k in (_usable_id(t) for t in todos) if k}
-        notice_ids = {k for k in (_usable_id(n) for n in notices) if k}
-        checked, promoting = prune_requests(live, notice_ids)
-    # "New" means the most recent round produced it. Comparing against roundSeq
-    # rather than a timestamp keeps it aligned with the state machine, so a
-    # paused app or a catch-up burst cannot mislabel a row.
-    latest = int(state.get("roundSeq", 0))
+        todos = [t for t in state.get("todos", []) if isinstance(t, dict)]
+        checked, levels = prune_requests(todos)
     rows = []
     for t in todos:
         tid = _usable_id(t)
+        stored = str(t.get("priority") or "")
+        # A queued level shows at once, so a filed row leaves 待分類 on the
+        # click instead of on the next round.
+        level = levels[tid] if tid in levels else stored
         rows.append({
             "id": tid or "",
             "tickable": tid is not None,
@@ -389,27 +373,20 @@ def api_todos():
             "deadline": t.get("deadline") or "",
             "uncertain": bool(t.get("uncertain")),
             "checked": tid is not None and tid in checked,
-            "isNew": int(t.get("createdRound", 0)) >= latest and latest > 0,
+            "priority": level if level in PRIORITIES else "",
+            "pendingLevel": tid is not None and tid in levels,
         })
-    # Sort on a parsed date, not the raw string. Lexicographic order puts
-    # "10-2" before "9-15", which shows a later deadline as the more urgent one.
-    rows.sort(key=lambda r: (r["checked"], not r["deadline"],
-                             _deadline_key(r["deadline"]), r["subject"]))
-    # Left in state.json order, which is oldest notice first. Sorting by a
-    # deadline would be wrong here: a notice has no deadline, only a push.
-    notice_rows = [{
-        "id": _usable_id(n) or "",
-        "promotable": _usable_id(n) is not None,
-        "subject": n.get("subject") or n.get("summary") or "(no subject)",
-        "sender": n.get("from") or "",
-        "mailbox": n.get("mailbox") or "",
-        "received": n.get("received") or "",
-        "summary": n.get("summary") or n.get("action") or "",
-        "pending": _usable_id(n) is not None and _usable_id(n) in promoting,
-    } for n in notices]
+    # Level first, then a parsed date rather than the raw string, because
+    # lexicographic order puts "10-2" before "9-15" and shows a later deadline
+    # as the more urgent one. 待分類 rows all rank last and the page splits them
+    # off, so their order is the date order alone.
+    rank = {p: i for i, p in enumerate(PRIORITIES)}
+    rows.sort(key=lambda r: (r["checked"], rank.get(r["priority"], len(PRIORITIES)),
+                             not r["deadline"], _deadline_key(r["deadline"]),
+                             r["subject"]))
     archived = len(_read_json(ARCHIVE_PATH, {}).get("archived", []))
-    return jsonify({"todos": rows, "notices": notice_rows,
-                    "archivedTotal": archived, "roundSeq": latest})
+    return jsonify({"todos": rows, "archivedTotal": archived,
+                    "roundSeq": int(state.get("roundSeq", 0))})
 
 
 @app.post("/api/ping")
@@ -479,13 +456,20 @@ PAGE = """<!doctype html>
  .hidden{display:none}
  .hd{font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
      color:#8b9096;padding-bottom:9px;margin-bottom:11px;border-bottom:1px solid #262a31}
- #secnotice .hd{color:#ffd479}
  #secnew .hd{color:#7fb2ff}
  #secarch .hd{color:#8b9096}
  .tog{float:right;font-weight:400;letter-spacing:0;text-transform:none;
       color:#7fb2ff;cursor:pointer;font-size:12px}
  .row.arch{opacity:.6}
- .row.note{border-color:#3d3626;background:#1e1c16}
+ .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;flex:none;
+       max-width:240px}
+ .lv{font-size:11px;font-weight:600;border-radius:5px;padding:1px 7px;margin-right:8px}
+ .lv.urgent{background:#4a1f22;color:#ff8b8b}
+ .lv.important{background:#43351a;color:#ffc46b}
+ .lv.normal{background:#262a31;color:#aab0b7}
+ .pend{color:#8b9096;font-size:11px;padding-top:6px}
+ .btn.urgent{border-color:#6b2c30;color:#ff9a9a}
+ .btn.important{border-color:#6b5226;color:#ffcf85}
  .btn{background:#23272e;border:1px solid #383d45;color:#cfd4da;border-radius:7px;
       padding:5px 11px;font-size:12px;cursor:pointer;flex:none}
  .btn:hover{background:#2b3038;color:#fff}
@@ -500,16 +484,12 @@ PAGE = """<!doctype html>
 <div class=wrap>
   <h1>Gmail 待辦</h1>
   <div class=sub id=sub>載入中</div>
-  <div class="sec hidden" id=secnotice>
-    <div class=hd>重要事項 <span class=n id=cntnotice></span></div>
-    <div id=listnotice></div>
-  </div>
   <div class=sec id=secnew>
-    <div class=hd>這次新增 <span class=n id=cntnew></span></div>
+    <div class=hd>待分類 <span class=n id=cntnew></span></div>
     <div id=listnew></div>
   </div>
   <div class=sec id=secold>
-    <div class=hd>之前的 <span class=n id=cntold></span></div>
+    <div class=hd>待辦清單 <span class=n id=cntold></span></div>
     <div id=listold></div>
   </div>
   <div class=sec id=secarch>
@@ -531,23 +511,42 @@ async function load(){
   try{ d = await (await fetch('/api/todos?cid='+CID)).json(); }
   catch(e){ document.getElementById('sub').textContent =
       '讀不到資料，伺服器已經關閉。重新啟動 task_list_gui.py'; return; }
-  const open = d.todos.filter(t=>!t.checked).length;
+  const fresh = d.todos.filter(t=>!t.priority);
+  const filed = d.todos.filter(t=>t.priority);
+  const waiting = fresh.filter(t=>!t.checked).length;
+  const open = filed.filter(t=>!t.checked).length;
+  const done = d.todos.filter(t=>t.checked).length;
   document.getElementById('sub').textContent =
-    d.todos.length ? `${open} 項待辦，${d.todos.length-open} 項已勾選待清理`
-                   : '目前沒有待辦';
+    `${waiting} 項待分類，${open} 項待辦` + (done ? `，${done} 項已排定封存` : '');
   document.getElementById('foot').textContent =
-    `勾選後會留在畫面上，下次排程更新時才封存，所以還可以反悔。已封存 ${d.archivedTotal} 項。`;
+    `分類、勾選或封存都在下次排程更新時才生效，在那之前都還可以反悔。已封存 ${d.archivedTotal} 項。`;
 
-  const fresh = d.todos.filter(t=>t.isNew);
-  const older = d.todos.filter(t=>!t.isNew);
-  fillNotices(d.notices || []);
-  fill('listnew', 'cntnew', 'secnew', fresh, '這一輪沒有新增');
-  fill('listold', 'cntold', 'secold', older, '沒有舊的待辦');
-  // Hide the whole list only when both sections are empty, so an empty "new"
-  // section still tells the user the run happened and found nothing.
-  document.getElementById('secold').classList.toggle('hidden',
-      !older.length && !d.todos.length);
+  fill('listnew', 'cntnew', fresh, '沒有待分類的信', triageRow);
+  fill('listold', 'cntold', filed, '目前沒有待辦', row);
   loadArchive();
+}
+
+const LEVELS = [['urgent','緊急'], ['important','重要'], ['normal','普通']];
+
+async function post(path, payload){
+  const res = await fetch(path,{method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  const j = await res.json();
+  if(!j.ok) throw new Error(j.error||'failed');
+  return j;
+}
+
+// Reloads on success rather than patching the row, because a level moves the
+// row to the other section and the server is what knows where it now sorts.
+function button(label, action, st, cls){
+  const b = el('button', cls || 'btn');
+  b.textContent = label;
+  b.onclick = async ()=>{
+    b.disabled = true; st.className='st saving'; st.textContent='儲存中';
+    try{ await action(); await load(); }
+    catch(e){ st.className='st failed'; st.textContent='未儲存'; b.disabled = false; }
+  };
+  return b;
 }
 
 let archOpen = false;
@@ -574,21 +573,10 @@ async function loadArchive(){
   for(const a of items) list.append(archRow(a));
 }
 
-// Hidden when empty, unlike 這次新增: an empty notice list says nothing, while
-// an empty 這次新增 still tells the user the round ran and found nothing.
-function fillNotices(items){
-  document.getElementById('secnotice').classList.toggle('hidden', !items.length);
-  const list = document.getElementById('listnotice');
-  list.textContent = '';
-  document.getElementById('cntnotice').textContent =
-    items.length ? `${items.length} 項，沒有處理就會移到已封存` : '';
-  for(const n of items) list.append(noticeRow(n));
-}
-
 // Everything that locates the original mail. scout is a forwarding hub, so
 // the sender names neither the account holding it nor when that account
 // took delivery. The return says whether anything landed, which is how the
-// notice and archive rows avoid appending an empty meta div.
+// archive rows avoid appending an empty meta div.
 function appendSource(meta, item){
   if(item.received) meta.append(Object.assign(el('span','box'),
       {textContent:'收信 ' + item.received}), document.createTextNode('  '));
@@ -605,39 +593,6 @@ function appendSource(meta, item){
     meta.append(b);
   }
   return meta.childNodes.length > 0;
-}
-
-function noticeRow(n){
-  const r = el('div','row note');
-  const body = el('div','body');
-  body.append(Object.assign(el('div','subj'),{textContent:n.subject}));
-  // A notice with no subject falls back to its summary for the heading, so
-  // rendering the summary again would print the same line twice.
-  if(n.summary && n.summary !== n.subject)
-    body.append(Object.assign(el('div','act'),{textContent:n.summary}));
-  const nmeta = el('div','meta');
-  if(appendSource(nmeta, n)) body.append(nmeta);
-  const btn = el('button','btn');
-  btn.textContent = n.pending ? '已排定加入' : '加到待辦';
-  btn.disabled = n.pending || !n.promotable;
-  if(!n.promotable) btn.title = '這筆缺少 message id，無法加入待辦';
-  btn.onclick = async ()=>{
-    btn.disabled = true; btn.textContent = '處理中';
-    try{
-      const res = await fetch('/api/promote',{method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({id:n.id})});
-      const j = await res.json();
-      if(!j.ok) throw new Error(j.error||'failed');
-      // Queued, not done -- see the module docstring on why every button
-      // says 已排定 rather than claiming it is finished.
-      btn.textContent = '已排定加入';
-    }catch(e){
-      btn.textContent = '加入失敗'; btn.disabled = false;
-    }
-  };
-  r.append(body, btn);
-  return r;
 }
 
 function archRow(a){
@@ -672,7 +627,7 @@ function archRow(a){
   return r;
 }
 
-function fill(listId, cntId, secId, items, emptyText){
+function fill(listId, cntId, items, emptyText, make){
   const list = document.getElementById(listId);
   list.textContent = '';
   document.getElementById(cntId).textContent = items.length ? `${items.length} 項` : '';
@@ -680,27 +635,62 @@ function fill(listId, cntId, secId, items, emptyText){
     list.append(Object.assign(el('div','none'),{textContent:emptyText}));
     return;
   }
-  for(const t of items) list.append(row(t));
+  for(const t of items) list.append(make(t));
 }
 
-function row(t){
-  const r = el('div','row' + (t.checked?' done':''));
-  const cb = el('input'); cb.type='checkbox'; cb.checked=t.checked;
-  if(!t.tickable){ cb.disabled=true; cb.title='這筆缺少 message id，無法勾選'; }
+function cardBody(t){
   const body = el('div','body');
   body.append(Object.assign(el('div','subj'),{textContent:t.subject}));
   if(t.action) body.append(Object.assign(el('div','act'),{textContent:t.action}));
   const meta = el('div','meta');
+  if(t.priority){
+    const name = (LEVELS.find(([lv])=>lv===t.priority) || [,''])[1];
+    meta.append(Object.assign(el('span','lv '+t.priority),
+        {textContent: name + (t.pendingLevel ? ' 已排定' : '')}));
+  }
   if(t.deadline){ const d=el('span','due'); d.textContent='期限 '+t.deadline;
                   meta.append(d, document.createTextNode('  ')); }
   if(t.uncertain){ const u=el('span','flag'); u.textContent='待確認 請自行開信';
                    meta.append(u, document.createTextNode('  ')); }
-  if(!t.tickable){ const n=el('span','flag'); n.textContent='缺 id 無法勾選';
+  if(!t.tickable){ const n=el('span','flag'); n.textContent='缺 id 無法操作';
                    meta.append(n, document.createTextNode('  ')); }
   appendSource(meta, t);
   body.append(meta);
+  return body;
+}
+
+// 待分類 gets the four choices and no checkbox. 封存 is the same queued tick
+// as 已完成, so until the round reads it the row stays here and can be undone.
+function triageRow(t){
+  const r = el('div','row' + (t.checked?' done':''));
+  const acts = el('div','acts');
   const st = el('div','st');
-  r.append(cb, body, st);
+  if(t.tickable && t.checked){
+    acts.append(Object.assign(el('span','pend'),{textContent:'已排定封存'}),
+                button('取消', ()=>post('/api/check',{id:t.id,checked:false}), st));
+  }else if(t.tickable){
+    for(const [lv, name] of LEVELS)
+      acts.append(button(name, ()=>post('/api/triage',{id:t.id,level:lv}), st,
+                         'btn ' + lv));
+    acts.append(button('封存', ()=>post('/api/check',{id:t.id,checked:true}), st));
+  }
+  r.append(cardBody(t), acts, st);
+  return r;
+}
+
+// 待辦清單 offers only 已完成 and 重新分類, never the three levels, so a filed row
+// cannot be re-filed by a stray click. 重新分類 sends it back to 待分類.
+function row(t){
+  const r = el('div','row' + (t.checked?' done':''));
+  const cb = el('input'); cb.type='checkbox'; cb.checked=t.checked;
+  cb.title = '已完成';
+  if(!t.tickable){ cb.disabled=true; cb.title='這筆缺少 message id，無法勾選'; }
+  const acts = el('div','acts');
+  const st = el('div','st');
+  if(t.tickable)
+    acts.append(button('重新分類', ()=>post('/api/triage',{id:t.id,level:''}), st));
+  acts.classList.toggle('hidden', t.checked);
+  r.append(cb, cardBody(t), acts, st);
 
   cb.onchange = async ()=>{
     const want = cb.checked;
@@ -714,6 +704,8 @@ function row(t){
       if(!j.ok) throw new Error(j.error||'failed');
       st.className='st saved'; st.textContent='已儲存';
       r.classList.toggle('done', want);
+      // A row queued as done has nothing left to re-file.
+      acts.classList.toggle('hidden', want);
       setTimeout(()=>{st.textContent='';},1400);
     }catch(e){
       // Never leave the box showing a state that is not on disk.

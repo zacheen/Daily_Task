@@ -3,7 +3,7 @@
 test_task_list_gui.py only covers the pure helpers, so /api/archive and /api/restore
 had no net at all. That is exactly where two comments drifted out of date
 through three review rounds, because nowhere else could an assertion fail. The
-promote endpoint behind the notice section arrives with one from the start.
+triage endpoint behind 待分類 arrives with one from the start.
 
 Flask's test client is used rather than a real server, so nothing binds a port
 and the watchdog never runs.
@@ -32,7 +32,7 @@ tg.STATE_PATH = os.path.join(work, "state.json")
 tg.CHECKED_PATH = os.path.join(work, "tasks-checked.json")
 tg.ARCHIVE_PATH = os.path.join(work, "tasks-archive.json")
 tg.RESTORE_PATH = os.path.join(work, "tasks-restore.json")
-tg.PROMOTE_PATH = os.path.join(work, "tasks-promote.json")
+tg.TRIAGE_PATH = os.path.join(work, "tasks-triage.json")
 tg.app.config["TESTING"] = True
 cli = tg.app.test_client()
 
@@ -63,104 +63,111 @@ def clear(*paths):
             os.unlink(p)
 
 
+def by_id(rows):
+    return {r["id"]: r for r in rows}
+
+
 NOW = int(time.time())
 DAY = 86400
 
-# --- /api/todos serves notices alongside todos ---
+# --- /api/todos serves every todo with the level the page files it under ---
 write(tg.STATE_PATH, {
     "roundSeq": 12,
-    "todos": [{"id": "old1", "subject": "older todo", "createdRound": 11,
+    "todos": [{"id": "old1", "subject": "older todo", "priority": "normal",
                "from": "reg@school.edu", "mailbox": "me@school.edu",
                "received": "2026-10-01 08:14",
                "action": "do the thing", "deadline": "2026-10-02"},
-              {"id": "new1", "subject": "newer todo", "createdRound": 12,
-               "deadline": "2026-09-15", "uncertain": True}],
-    "notices": [{"id": "nt1", "subject": "recruiter reply", "from": "a@b.c",
-                 "mailbox": "scout", "summary": "reply by Friday",
-                 "noticedRound": 12},
-                {"id": "nt2", "summary": "album shared", "noticedRound": 12}],
+              {"id": "new2", "subject": "second new mail", "deadline": "2026-10-20"},
+              {"id": "new1", "subject": "new mail", "deadline": "2026-09-15",
+               "uncertain": True},
+              {"id": "urg1", "subject": "urgent one", "priority": "urgent",
+               "deadline": "2026-12-01"},
+              {"id": "imp1", "subject": "important one", "priority": "important"}],
 })
 d = cli.get("/api/todos").get_json()
-check("notices come back in their own list",
-      [n["id"] for n in d["notices"]] == ["nt1", "nt2"], d["notices"])
-check("state.json order is preserved, oldest notice first",
-      d["notices"][0]["id"] == "nt1", d["notices"])
-check("a notice with no subject falls back to its summary",
-      d["notices"][1]["subject"] == "album shared", d["notices"][1])
-check("the sender is carried through for the row's meta line",
-      d["notices"][0]["sender"] == "a@b.c", d["notices"][0])
-check("the delivering mailbox rides along, so the row can say where to look",
-      d["notices"][0]["mailbox"] == "scout", d["notices"][0])
-check("a todo carries its mailbox too",
-      [t["mailbox"] for t in d["todos"] if t["id"] == "old1"] == ["me@school.edu"],
-      d["todos"])
-check("a todo stored before the field existed serves an empty one, not a KeyError",
-      [t["mailbox"] for t in d["todos"] if t["id"] == "new1"] == [""],
-      d["todos"])
-check("the received stamp rides along too, so the row can say when to look",
-      [t["received"] for t in d["todos"] if t["id"] == "old1"]
-      == ["2026-10-01 08:14"], d["todos"])
-check("the mailbox is served as stored, alias and all, for the page to label",
-      d["notices"][0]["mailbox"] == "scout", d["notices"][0])
+rows = by_id(d["todos"])
+check("an untriaged todo is served with no level, which is what puts it in 待分類",
+      rows["new1"]["priority"] == "" and rows["new2"]["priority"] == "", d["todos"])
+check("a filed todo carries its level", rows["urg1"]["priority"] == "urgent", rows["urg1"])
+check("filed rows sort by level before deadline",
+      [t["id"] for t in d["todos"] if t["priority"]] == ["urg1", "imp1", "old1"],
+      [t["id"] for t in d["todos"]])
+check("untriaged rows sort by parsed deadline among themselves",
+      [t["id"] for t in d["todos"] if not t["priority"]] == ["new1", "new2"],
+      [t["id"] for t in d["todos"]])
 check("nothing is pending before the user clicks",
-      not any(n["pending"] for n in d["notices"]), d["notices"])
-check("todos still sort by parsed deadline, not lexicographically",
-      [t["id"] for t in d["todos"]] == ["new1", "old1"], d["todos"])
-check("the new todo is flagged as new", d["todos"][0]["isNew"] is True, d["todos"][0])
+      not any(t["pendingLevel"] for t in d["todos"]), d["todos"])
+check("a todo carries its mailbox", rows["old1"]["mailbox"] == "me@school.edu", rows["old1"])
+check("a todo stored before the field existed serves an empty one, not a KeyError",
+      rows["new1"]["mailbox"] == "", rows["new1"])
+check("the received stamp rides along too, so the row can say when to look",
+      rows["old1"]["received"] == "2026-10-01 08:14", rows["old1"])
+check("the old notices list is no longer served", "notices" not in d, list(d))
 
-# --- /api/promote queues, and says so ---
-r = cli.post("/api/promote", json={"id": "nt1"})
-check("promoting a live notice succeeds", r.status_code == 200 and r.get_json()["ok"],
+# --- /api/triage queues, and the page shows the level at once ---
+r = cli.post("/api/triage", json={"id": "new1", "level": "urgent"})
+check("filing a live todo succeeds", r.status_code == 200 and r.get_json()["ok"],
       r.get_json())
-check("the request lands in the promote file, nowhere else",
-      read(tg.PROMOTE_PATH)["promoteIds"] == ["nt1"], read(tg.PROMOTE_PATH))
-check("the promote file carries a rev like the other request files",
-      bool(read(tg.PROMOTE_PATH).get("rev")), read(tg.PROMOTE_PATH))
+check("the request lands in the triage file, nowhere else",
+      read(tg.TRIAGE_PATH)["levels"] == {"new1": "urgent"}, read(tg.TRIAGE_PATH))
+check("the triage file carries a rev like the other request files",
+      bool(read(tg.TRIAGE_PATH).get("rev")), read(tg.TRIAGE_PATH))
 check("state.json is untouched, so it keeps one writer",
-      read(tg.STATE_PATH)["notices"][0]["id"] == "nt1")
-check("the row now reports itself as pending",
-      [n["pending"] for n in cli.get("/api/todos").get_json()["notices"]] == [True, False])
+      "priority" not in by_id(read(tg.STATE_PATH)["todos"])["new1"])
+d = cli.get("/api/todos").get_json()
+check("the queued level is served at once, so the row leaves 待分類 on the click",
+      by_id(d["todos"])["new1"]["priority"] == "urgent", by_id(d["todos"])["new1"])
+check("and marked pending until the round writes it",
+      by_id(d["todos"])["new1"]["pendingLevel"] is True, by_id(d["todos"])["new1"])
 
-r = cli.post("/api/promote", json={"id": "nt2"})
-check("a second promote is added, not substituted",
-      read(tg.PROMOTE_PATH)["promoteIds"] == ["nt1", "nt2"], read(tg.PROMOTE_PATH))
+r = cli.post("/api/triage", json={"id": "old1", "level": ""})
+check("重新分類 queues an empty level", r.get_json()["ok"] is True, r.get_json())
+check("and is added beside the first request, not substituted",
+      read(tg.TRIAGE_PATH)["levels"] == {"new1": "urgent", "old1": ""},
+      read(tg.TRIAGE_PATH))
+check("the row is served back in 待分類 at once",
+      by_id(cli.get("/api/todos").get_json()["todos"])["old1"]["priority"] == "")
 
-# A click that lands after a round swept the notice must fail visibly. Queueing
-# it would leave a request nothing ever consumes.
-r = cli.post("/api/promote", json={"id": "swept-already"})
-check("promoting a notice that is gone is refused",
+r = cli.post("/api/triage", json={"id": "new2", "level": "someday"})
+check("a level the state machine does not know is refused", r.status_code == 400,
+      r.get_json())
+check("and it is not queued", "new2" not in read(tg.TRIAGE_PATH)["levels"])
+r = cli.post("/api/triage", json={"id": "archived-already", "level": "normal"})
+check("filing a todo that is gone is refused",
       r.status_code == 409 and r.get_json()["gone"] is True, r.get_json())
-check("and it is not queued", "swept-already" not in read(tg.PROMOTE_PATH)["promoteIds"])
-
-r = cli.post("/api/promote", json={})
-check("promoting with no id is a bad request", r.status_code == 400, r.status_code)
+check("and nothing is queued for it",
+      "archived-already" not in read(tg.TRIAGE_PATH)["levels"])
+r = cli.post("/api/triage", json={"level": "normal"})
+check("filing with no id is a bad request", r.status_code == 400, r.status_code)
 
 # --- consumed requests are pruned, or the files grow forever ---
-# The state machine has promoted nt1 into a todo and swept nt2, so neither id
-# is a live notice any more.
-write(tg.STATE_PATH, {"roundSeq": 13,
-                      "todos": [{"id": "nt1", "subject": "promoted", "createdRound": 13}],
-                      "notices": []})
+# The state machine has applied both levels, and imp1 has left the list.
+write(tg.STATE_PATH, {"roundSeq": 13, "todos": [
+    {"id": "new1", "subject": "new mail", "priority": "urgent"},
+    {"id": "old1", "subject": "older todo"},
+    {"id": "new2", "subject": "second new mail"}]})
+write(tg.TRIAGE_PATH, {"levels": {"new1": "urgent", "old1": "", "imp1": "normal",
+                                  "new2": "important"}})
 cli.get("/api/todos")
-check("promote ids drop once their notice leaves state.json",
-      read(tg.PROMOTE_PATH)["promoteIds"] == [], read(tg.PROMOTE_PATH))
+check("a level drops once state.json carries it, and so does one for a todo that left",
+      read(tg.TRIAGE_PATH)["levels"] == {"new2": "important"}, read(tg.TRIAGE_PATH))
 
-write(tg.CHECKED_PATH, {"checkedIds": ["nt1", "already-archived"]})
+write(tg.CHECKED_PATH, {"checkedIds": ["new1", "already-archived"]})
 write(tg.RESTORE_PATH, {"restoreIds": ["not-in-archive"]})
 write(tg.ARCHIVE_PATH, {"archived": []})
 cli.get("/api/todos")
 check("a tick for a todo that is gone is pruned",
-      read(tg.CHECKED_PATH)["checkedIds"] == ["nt1"], read(tg.CHECKED_PATH))
+      read(tg.CHECKED_PATH)["checkedIds"] == ["new1"], read(tg.CHECKED_PATH))
 check("a restore for something no longer archived is pruned",
       read(tg.RESTORE_PATH)["restoreIds"] == [], read(tg.RESTORE_PATH))
 
-# --- /api/check ---
-r = cli.post("/api/check", json={"id": "nt1", "checked": True})
+# --- /api/check, which 待分類's 封存 button also uses ---
+r = cli.post("/api/check", json={"id": "new2", "checked": True})
 check("ticking a live todo succeeds", r.get_json()["ok"] is True, r.get_json())
 check("the tick is on disk before the response returns",
-      "nt1" in read(tg.CHECKED_PATH)["checkedIds"], read(tg.CHECKED_PATH))
-r = cli.post("/api/check", json={"id": "nt1", "checked": False})
-check("un-ticking removes it", read(tg.CHECKED_PATH)["checkedIds"] == [],
+      "new2" in read(tg.CHECKED_PATH)["checkedIds"], read(tg.CHECKED_PATH))
+r = cli.post("/api/check", json={"id": "new2", "checked": False})
+check("un-ticking removes it", read(tg.CHECKED_PATH)["checkedIds"] == ["new1"],
       read(tg.CHECKED_PATH))
 r = cli.post("/api/check", json={"id": "archived-mid-session", "checked": True})
 check("ticking a todo archived while the tab was open is refused as stale",
@@ -217,59 +224,29 @@ check("restoring something already purged is refused",
 r = cli.post("/api/restore", json={})
 check("restoring with no id is a bad request", r.status_code == 400, r.status_code)
 
-# --- 重要事項 never shows a mail the todo list already carries ---
-# Reported from the GUI: a mail with both a push and a next step got a row in
-# each section at once. record_notices keeps the two queues disjoint now, so
-# what is left to cover here is state written before that rule, and the promote
-# endpoint agreeing with what the page renders.
-clear(tg.CHECKED_PATH, tg.RESTORE_PATH, tg.PROMOTE_PATH)
-write(tg.STATE_PATH, {
-    "roundSeq": 20,
-    "todos": [{"id": "dup", "subject": "PayPal statement", "createdRound": 20,
-               "action": "log in and reconcile August"}],
-    "notices": [{"id": "dup", "subject": "PayPal statement",
-                 "summary": "August statement is out", "noticedRound": 20},
-                {"id": "solo", "summary": "a person wrote to you",
-                 "noticedRound": 20},
-                {"subject": "no id at all", "noticedRound": 20}],
-})
-d = cli.get("/api/todos").get_json()
-check("a notice whose message is a live todo is not served",
-      [n["id"] for n in d["notices"]] == ["solo", ""], d["notices"])
-check("the todo row is untouched, so the mail is still actionable",
-      [t["id"] for t in d["todos"]] == ["dup"], d["todos"])
-r = cli.post("/api/promote", json={"id": "dup"})
-check("promoting it is refused, since the state machine would skip it anyway",
-      r.status_code == 409 and r.get_json()["gone"] is True, r.get_json())
-check("so no request file is created for a button the page never renders",
-      not os.path.exists(tg.PROMOTE_PATH))
-
 # --- a missing state.json must serve an empty list, not a 500 ---
-clear(tg.STATE_PATH, tg.ARCHIVE_PATH, tg.CHECKED_PATH, tg.RESTORE_PATH, tg.PROMOTE_PATH)
+clear(tg.STATE_PATH, tg.ARCHIVE_PATH, tg.CHECKED_PATH, tg.RESTORE_PATH, tg.TRIAGE_PATH)
 d = cli.get("/api/todos").get_json()
-check("a first run with no state file still serves",
-      d["todos"] == [] and d["notices"] == [], d)
+check("a first run with no state file still serves", d["todos"] == [], d)
 check("and no request file was created just by reading",
-      not os.path.exists(tg.PROMOTE_PATH) and not os.path.exists(tg.CHECKED_PATH))
+      not os.path.exists(tg.TRIAGE_PATH) and not os.path.exists(tg.CHECKED_PATH))
 
-# --- the section has to actually be in the page, above 這次新增 ---
+# --- the page: 待分類 above 待辦清單, and only 待分類 offers the levels ---
 page = tg.index()
-check("the page renders the notice section", "重要事項" in page)
-check("it sits above the new-todo section", page.index("重要事項") < page.index("這次新增"),
-      "the user asked for it above the new-todo section")
-check("it starts hidden, so an empty one does not flash on load",
-      'class="sec hidden" id=secnotice' in page)
-check("the promote button posts to the promote endpoint", "'/api/promote'" in page)
+check("both sections are in the page, 待分類 first",
+      "待分類" in page and "待辦清單" in page and page.index("待分類") < page.index("待辦清單"))
+check("the retired section names are gone",
+      not any(name in page for name in ("重要事項", "這次新增", "之前的")))
+check("the level buttons post to the triage endpoint", "'/api/triage'" in page)
+check("the four choices are all there", all(f"'{w}'" in page for w in ("緊急", "重要", "普通"))
+      and "button('封存'" in page)
+check("the level buttons are built in one place only, which is 待分類",
+      page.count("for(const [lv, name] of LEVELS)") == 1)
+check("a filed row offers 重新分類 instead", "button('重新分類'" in page)
 check("an alias mailbox is labelled rather than left looking unresolved",
       "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",
-      page.count("appendSource(") == 4, page.count("appendSource("))
-# Caught by looking at the rendered page: the subject falls back to the summary,
-# so a notice with no subject printed the same line twice.
-check("a summary equal to the subject is not printed twice",
-      "n.summary !== n.subject" in page)
-check("a notice row explains what happens if it is ignored",
-      "移到已封存" in page)
+      page.count("appendSource(") == 3, page.count("appendSource("))
 
 shutil.rmtree(work, ignore_errors=True)
 print()

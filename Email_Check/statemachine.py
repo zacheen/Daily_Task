@@ -29,7 +29,7 @@ import os
 import sys
 import tempfile
 import time
-from typing import Any, NamedTuple
+from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state.json")
@@ -38,14 +38,14 @@ PROGRESS_PATH = os.path.join(HERE, "round-progress.json")
 # The GUI is the only writer of the three request files below and only ever
 # reads state.json and the archive, so no file has two writers and no
 # cross-process lock is needed. Each one is a verb the user aimed at a row:
-# ticked means done, restore means un-archive, promote means the notified mail
-# in the GUI's 重要事項 section is really a todo. All three are read here.
+# ticked means done, restore means un-archive, triage means file this todo
+# under a level, or send it back to 待分類. All three are read here.
 # All four files now live in task_list/, alongside the viewer.
 TASK_LIST_DIR = os.path.join(HERE, "task_list")
 CHECKED_PATH = os.path.join(TASK_LIST_DIR, "tasks-checked.json")
 ARCHIVE_PATH = os.path.join(TASK_LIST_DIR, "tasks-archive.json")
 RESTORE_PATH = os.path.join(TASK_LIST_DIR, "tasks-restore.json")
-PROMOTE_PATH = os.path.join(TASK_LIST_DIR, "tasks-promote.json")
+TRIAGE_PATH = os.path.join(TASK_LIST_DIR, "tasks-triage.json")
 CONFIG_PATH = os.path.join(HERE, "config.json")
 
 MAX_RESULTS = 40
@@ -73,11 +73,11 @@ WAIT_POLL_SECONDS = 10
 # slots 30 minutes apart, 45 minutes skips every other one.
 RECENT_COMMIT_SECONDS = 45 * 60
 JUDGE_WAIT_LIMIT_ROUNDS = 2
-# How many rounds a notice stays reviewable before it is swept into the archive,
-# where ARCHIVE_TTL disposes of it. One means "until the next round", which is
-# what makes leaving a notice alone a decision instead of a growing backlog.
-NOTICE_REVIEW_ROUNDS = 1
 BACKLOG_NOTICE_EVERY = 3
+# The levels a todo can be filed under, most urgent first, which is also the
+# GUI's sort order. A todo with none of them is 待分類 and stays there until the
+# user picks one, so nothing leaves that section on a clock.
+PRIORITIES = ("urgent", "important", "normal")
 NOTIFIED_KEEP = 100
 # How long an archived todo stays recoverable. Three days to notice a mis-tick,
 # then it is gone for good.
@@ -85,24 +85,6 @@ ARCHIVE_TTL = 3 * 86400
 # Stands in for a rev that could not be read. Never equal to a real rev, so a
 # compare-and-swap against it always refuses the write.
 UNREADABLE_REV = "__unreadable__"
-# Local-clock window in which a round may open the todo list. The 06:25
-# round would otherwise pop a browser window while the user is asleep.
-# End is exclusive; 23 still lets the 22:10 round through.
-GUI_OPEN_HOURS = (9, 23)
-
-
-def within_gui_hours(hour: int, window: tuple[int, int]) -> bool:
-    """Whether `hour` falls in `window`, whose end is exclusive.
-
-    `window` is a parameter rather than a GUI_OPEN_HOURS-bound default, since
-    a default binds at definition time and would silently ignore both a
-    test's override and any later edit to the constant.
-
-    Wrap-around is handled so that moving the window across midnight narrows
-    it instead of silently matching nothing.
-    """
-    lo, hi = window
-    return lo <= hour < hi if lo <= hi else (hour >= lo or hour < hi)
 
 
 def read_config() -> dict[str, Any]:
@@ -322,9 +304,9 @@ def _read_id_request(path: str, key: str, fault: str) -> tuple[set[str], str, An
     rev) shape as _read_archive, so the three of them cannot drift apart.
 
     A non-empty reason means "unknown", never "nothing requested": acting on a
-    file that could not be read would archive, restore, or promote on no
-    evidence. An absent file is not a fault, since the GUI only writes one
-    once the user acts on something.
+    file that could not be read would archive or restore on no evidence. An
+    absent file is not a fault, since the GUI only writes one once the user
+    acts on something.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -338,6 +320,24 @@ def _read_id_request(path: str, key: str, fault: str) -> tuple[set[str], str, An
 
 def _read_ticks() -> tuple[set[str], str, Any]:
     return _read_id_request(CHECKED_PATH, "checkedIds", "tick file unreadable")
+
+
+def _read_triage() -> tuple[dict[str, str], str]:
+    """Levels the GUI asked for, keyed by message id, plus why they were unreadable.
+
+    A map rather than an id set, so it cannot share _read_id_request. It keeps
+    the same contract: an unreadable file means unknown, never "nothing asked".
+    """
+    try:
+        with open(TRIAGE_PATH, encoding="utf-8") as fh:
+            levels = json.load(fh).get("levels", {})
+        if not isinstance(levels, dict):
+            raise ValueError("levels is not an object")
+        return {str(k): str(v) for k, v in levels.items()}, ""
+    except FileNotFoundError:
+        return {}, ""
+    except Exception:
+        return {}, "triage file unreadable"
 
 
 def _merge(prior: dict, latest: dict) -> dict:
@@ -383,14 +383,6 @@ def _atomic_json(path: str, payload: Any) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-
-
-class NoticeFiling(NamedTuple):
-    """What record_notices did. Named because both halves are counts that reach
-    the user as separate emitted fields, so a swapped pair would look plausible.
-    """
-    filed: int
-    dropped: int
 
 
 class StaleStateError(Exception):
@@ -472,7 +464,7 @@ class Coverage:
 
 
 class State:
-    """Everything state.json holds: coverage, the four debt queues, and the
+    """Everything state.json holds: coverage, the three queues, and the
     bookkeeping that decides whether a notification has already been sent."""
 
     def __init__(self, data: dict[str, Any]):
@@ -481,10 +473,9 @@ class State:
         self.pendingNotify: list[dict] = list(data.get("pendingNotify", []))
         self.pendingJudge: list[dict] = list(data.get("pendingJudge", []))
         self.todos: list[dict] = list(data.get("todos", []))
-        # What was pushed recently, waiting for the user to promote it to a todo
-        # or leave it. Unlike the other three queues this one has a deadline:
-        # sweep_notices empties it, so nothing here survives without a decision.
-        self.notices: list[dict] = list(data.get("notices", []))
+        # The 重要事項 queue from before triage. Only migrate_triage reads it,
+        # and save() no longer writes it back.
+        self._legacy_notices: list[dict] = list(data.get("notices", []))
         self.notifiedIds: list[str] = list(data.get("notifiedIds", []))
         self.roundSeq: int = int(data.get("roundSeq", 0))
         # The revision this instance was loaded at. save() refuses to write if
@@ -498,19 +489,52 @@ class State:
         # Written only by a commit that succeeded. 0 means none recorded, which
         # the gate reads as "run".
         self.lastCommitAt: int = int(data.get("lastCommitAt", 0))
+        # When todos started carrying a priority. 0 means this file predates it,
+        # and consume_restores uses it to tell old archive entries from new ones.
+        self.triageSince: int = int(data.get("triageSince", 0))
 
     @classmethod
     def load_or_init(cls, now: int) -> tuple["State", bool]:
         if not os.path.exists(STATE_PATH):
-            return cls({"horizon": now - FIRST_RUN_LOOKBACK}), True
+            state = cls({"horizon": now - FIRST_RUN_LOOKBACK})
+            state.migrate_triage(now)
+            return state, True
         try:
             with open(STATE_PATH, encoding="utf-8") as fh:
                 data = json.load(fh)
             if "horizon" not in data:
                 raise ValueError("missing horizon")
-            return cls(data), False
+            state = cls(data)
         except Exception as exc:
             raise StateError(str(exc)) from exc
+        state.migrate_triage(now)
+        return state, False
+
+    def migrate_triage(self, now: int) -> None:
+        """Bring a file from before triage onto it, once.
+
+        Everything already on the list, and every mail still waiting in the old
+        重要事項 queue, becomes 普通, the user's call for existing mail. A notice
+        whose message is already a todo adds nothing, because the todo carries
+        the action the LLM wrote and the notice only the toast's summary.
+        """
+        if self.triageSince:
+            return
+        for todo in self.todos:
+            todo.setdefault("priority", "normal")
+        live = {_usable_id(t) for t in self.todos}
+        for notice in self._legacy_notices:
+            key = _usable_id(notice)
+            if key is not None and key in live:
+                continue
+            todo = {k: v for k, v in notice.items()
+                    if k not in ("noticedRound", "noticedAt")}
+            todo.setdefault("action", notice.get("summary", ""))
+            todo.setdefault("createdRound", self.roundSeq)
+            todo["priority"] = "normal"
+            self.todos.append(todo)
+        self._legacy_notices = []
+        self.triageSince = now
 
     @staticmethod
     def _disk_rev() -> tuple[bool, Any]:
@@ -554,12 +578,12 @@ class State:
             "pendingNotify": self.pendingNotify,
             "pendingJudge": self.pendingJudge,
             "todos": self.todos,
-            "notices": self.notices,
             "notifiedIds": self.notifiedIds,
             "roundSeq": self.roundSeq,
             "lastBacklogNoticeRound": self.lastBacklogNoticeRound,
             "lastConfigStatus": self.lastConfigStatus,
             "lastCommitAt": self.lastCommitAt,
+            "triageSince": self.triageSince,
             "rev": self.rev,
         }
         _atomic_json(STATE_PATH, payload)
@@ -623,7 +647,11 @@ class State:
         is a guard for a field that does not yet exist rather than live logic.
         It stays because the invariant it protects is the expensive one, and
         because any future writer would otherwise silently lose it.
+
+        `priority` is stripped from every report, so the user's triage is its
+        only source and an upsert keeps whatever level the list already had.
         """
+        reported = [{k: v for k, v in r.items() if k != "priority"} for r in reported]
         kept: dict[str, dict] = {}
         orphans: dict[str, dict] = {}
         for item in list(self.todos) + list(reported):
@@ -647,166 +675,70 @@ class State:
             kept[key] = merged
         self.todos = list(kept.values()) + list(orphans.values())
 
-    def record_notices(self, pushed: list[dict], now: int,
-                       incoming_todos: set[str]) -> NoticeFiling:
-        """File what was just pushed as a reviewable notice.
+    def pushed_as_todos(self, pushed: list[dict], incoming: set[str]) -> list[dict]:
+        """Todos for pushed mail that has none, so it waits in 待分類 with the rest.
 
-        Returns how many were filed, plus how many the todo list already owns.
+        A message already on the list, or reported as a todo this round, keeps
+        the row it has. The push carries only the toast's one-line summary,
+        which would otherwise overwrite the action the LLM wrote for it.
 
-        Upserts by message id rather than appending, so mail notified again in
-        a later round refreshes its text and restarts its review clock instead
-        of appearing twice.
-
-        A message that is also a todo is never filed: 重要事項 is only for
-        pushed mail the todo list will never show, so a duplicate row would
-        be pure noise (its 加到待辦 button would be a no-op anyway, since
-        consume_promotes already skips a live duplicate). `incoming_todos` is
-        needed on top of self.todos because reconcile_todos runs after this, so
-        this round's reported todos are not on the list yet.
-
-        A notice already filed is dropped, not archived, the round its message
-        turns into a todo. Sweeping it would hand back a 復原 button for work the
-        user can see on the list, and the todo is the surviving record regardless.
-
-        Must run before sweep_notices in the same commit. The other order
-        sweeps a notice into the archive and then re-files it here, leaving one
-        message in both places at once.
-
-        Queue bookkeeping from wherever the entry came from is dropped, so a
-        promoted notice does not carry another queue's clock into the todo list.
+        Merged by message id, since the same push normally arrives from both
+        pendingNotify and this round's report. Another queue's bookkeeping is
+        dropped so its clock does not follow the message onto the list.
         """
-        owned = incoming_todos | {k for k in (_usable_id(t) for t in self.todos)
-                                  if k is not None}
-        kept: dict[str, dict] = {}
-        # An id-less entry is unreachable from the GUI, which can only send ids
-        # back, so it can never be promoted. It is carried through anyway, the
-        # same keep-by-default rule the other queues follow, and sweep_notices
-        # is what eventually disposes of it. It cannot be matched against a todo
-        # either, so the todo-owns-it rule never reaches one.
-        orphans = [n for n in self.notices if _usable_id(n) is None]
-        dropped: set[str] = set()
-        for item in list(self.notices) + list(pushed):
+        owned = incoming | {k for k in (_usable_id(t) for t in self.todos)
+                            if k is not None}
+        made: dict[str, dict] = {}
+        for item in pushed:
             key = _usable_id(item)
-            if key is None:
+            if key is None or key in owned:
                 continue
-            if key in owned:
-                dropped.add(key)
-                continue
-            kept[key] = _merge(kept.get(key, {}), item)
-        fresh = {k for k in (_usable_id(i) for i in pushed)
-                 if k is not None} - owned
-        for key in fresh:
-            for foreign in ("firstDeferredRound", "archivedAt", "createdRound"):
-                kept[key].pop(foreign, None)
-            kept[key]["noticedRound"] = self.roundSeq
-            kept[key]["noticedAt"] = now
-        self.notices = list(kept.values()) + orphans
-        # Distinct messages, not entries: the same id normally arrives from
-        # both pendingNotify and this round's report.
-        return NoticeFiling(len(fresh), len(dropped))
-
-    def consume_promotes(self) -> tuple[list[dict], str]:
-        """Turn notices the user promoted in the GUI into todos.
-
-        The request arrives in a GUI-owned file for the same reason ticks and
-        restores do, so state.json keeps exactly one writer.
-
-        Must run before sweep_notices, or a notice promoted in the hours before
-        this round would be archived instead of becoming a todo.
-        """
-        wanted, err, _ = _read_id_request(PROMOTE_PATH, "promoteIds",
-                                          "promote file unreadable")
-        if err:
-            return [], err
-        moved = [n for n in self.notices if _usable_id(n) in wanted]
-        if not moved:
-            return [], ""
-        live = {_usable_id(t) for t in self.todos}
-        added = []
-        for item in moved:
             clean = {k: v for k, v in item.items()
-                     if k not in ("noticedRound", "noticedAt")}
-            # Skipped rather than merged when a todo for the same message is
-            # already live: the notice carries a one-line summary of the push,
-            # which would overwrite the action the LLM wrote for the todo.
-            if _usable_id(clean) in live:
-                continue
-            # Set here, not left to reconcile_todos, so a promotion shows up
-            # under 這次新增 in the round the user asked for it.
-            clean["createdRound"] = self.roundSeq
-            self.todos.append(clean)
-            added.append(clean)
-        # An id-less notice survives, since `wanted` only ever holds real ids.
-        self.notices = [n for n in self.notices if _usable_id(n) not in wanted]
-        # What actually reached the list, not everything the request matched.
-        # The count goes into a push, so counting a skipped duplicate would tell
-        # the user a todo was added that they will not find.
-        return added, ""
+                     if k not in ("firstDeferredRound", "archivedAt", "createdRound")}
+            made[key] = _merge(made.get(key, {}), clean)
+        for todo in made.values():
+            todo.setdefault("action", todo.get("summary", ""))
+        return list(made.values())
 
-    def settle_notices(self, pushed: list[dict], now: int,
-                       incoming_todos: set[str]) -> dict[str, Any]:
-        """Run the whole notice lifecycle for this round, in the one safe order.
+    def consume_triage(self) -> tuple[int, str]:
+        """Apply the levels the user picked in the GUI. Returns how many todos
+        changed, plus why the request could not be read.
 
-        Both dependencies are real, and both were proven by execution:
-        promoting after the sweep silently discards the request, and sweeping
-        before filing archives a re-notified message and then re-files it,
-        leaving it in two places. Grouping them here is what stops cmd_commit
-        from having to remember that.
-
-        Called before the reconcile_* pass, so a promoted notice goes through
-        reconcile_todos like any reported todo and picks up its deadline
-        normalisation. That is also why `incoming_todos` has to be handed in
-        rather than read off self.todos -- see record_notices.
+        "" sends a todo back to 待分類, which is what 重新分類 asks for. Any other
+        value outside PRIORITIES is ignored rather than stored, because the GUI
+        could place such a row in neither section.
         """
-        promoted, promote_err = self.consume_promotes()
-        filing = self.record_notices(pushed, now, incoming_todos)
-        swept, sweep_err = self.sweep_notices(now)
-        return {"promoted": promoted, "promoteBlocked": promote_err,
-                "newNotices": filing.filed, "skippedAsTodo": filing.dropped,
-                "swept": swept, "sweepBlocked": sweep_err}
-
-    def sweep_notices(self, now: int) -> tuple[int, str]:
-        """Archive notices the user left alone. Returns how many, plus a fault.
-
-        Taking no action is the third choice next to promoting and ignoring:
-        the notice lands in the archive, where 復原 can still pull it back and
-        the existing ARCHIVE_TTL purge disposes of it three days later.
-
-        Sweeping is never urgent, so a refused archive write leaves the notices
-        in place and the next round retries, rather than dropping them.
-        """
-        stale, keep = [], []
-        for item in self.notices:
-            try:
-                age = self.roundSeq - int(item["noticedRound"])
-            except (KeyError, TypeError, ValueError):
-                # Missing or unusable: sweep rather than stick. The archive is
-                # recoverable for three days, while a notice nothing can age
-                # out is not recoverable from at all.
-                age = NOTICE_REVIEW_ROUNDS
-            (stale if age >= NOTICE_REVIEW_ROUNDS else keep).append(item)
-        if not stale:
-            return 0, ""
-        prev, err, rev = _read_archive()
+        levels, err = _read_triage()
         if err:
             return 0, err
-        already = {_usable_id(a) for a in prev}
-        add = [dict(n, archivedAt=now) for n in stale
-               if _usable_id(n) not in already]
-        if add and not _write_archive(prev + add, rev):
-            return 0, "archive not writable"
-        self.notices = keep
-        return len(stale), ""
+        changed = 0
+        for todo in self.todos:
+            key = _usable_id(todo)
+            if key is None or key not in levels:
+                continue
+            want = levels[key]
+            if want in PRIORITIES and todo.get("priority") != want:
+                todo["priority"] = want
+                changed += 1
+            elif want == "" and "priority" in todo:
+                del todo["priority"]
+                changed += 1
+        return changed, ""
+
+    def untriaged_count(self) -> int:
+        """Todos still in 待分類. An id-less one is left out, because the GUI
+        can send no level back for it and it would hold the list open forever."""
+        return sum(1 for t in self.todos
+                   if _usable_id(t) is not None and t.get("priority") not in PRIORITIES)
 
     def orphan_count(self) -> int:
         """Queue entries with no usable id, surfaced so they cannot pile up unseen."""
-        return sum(1 for q in (self.pendingNotify, self.pendingJudge,
-                               self.todos, self.notices)
+        return sum(1 for q in (self.pendingNotify, self.pendingJudge, self.todos)
                    for item in q if _usable_id(item) is None)
 
     def consume_checked(self) -> tuple[list[dict], str]:
-        """Archive todos the user ticked and drop their notices too. Returns
-        the archived todos plus why none were.
+        """Archive todos the user ticked. Returns the archived todos plus why
+        none were. 待分類's 封存 button is the same tick, so this covers it too.
 
         Only items already ticked when this runs are archived. Anything ticked
         during the round survives to the next one, so a box does not vanish the
@@ -856,13 +788,6 @@ class State:
             return [], ""
 
         self.todos = [t for t in self.todos if _usable_id(t) not in ticked]
-        # The notice goes too. consume_promotes decides "is this already a todo"
-        # by looking at self.todos, which no longer holds this id, so a promote
-        # click still sitting in the request file would otherwise re-add the
-        # message as a fresh unticked todo. reconcile_todos happens to drop it
-        # again because `ticked` is its drop set, but that only holds while
-        # promotion runs first, which nothing enforces.
-        self.notices = [n for n in self.notices if _usable_id(n) not in ticked]
         return done, ""
 
 
@@ -873,6 +798,10 @@ class State:
         state.json, so no file gains a second writer. Restoring also clears the
         id from notifiedIds, or the todo would be live again while the pipeline
         still treated it as settled and never re-notified it.
+
+        A todo comes back at the level it was archived with. One with no level
+        that was archived before triage existed is old mail, which is 普通. One
+        archived since then was never triaged, so it goes back to 待分類.
         """
         wanted, err, _ = _read_id_request(RESTORE_PATH, "restoreIds",
                                           "restore file unreadable")
@@ -891,6 +820,12 @@ class State:
         live = {_usable_id(t) for t in self.todos}
         for item in back:
             clean = {k: v for k, v in item.items() if k != "archivedAt"}
+            try:
+                archived_at = int(item.get("archivedAt", 0))
+            except (TypeError, ValueError):
+                archived_at = 0
+            if "priority" not in clean and archived_at < self.triageSince:
+                clean["priority"] = "normal"
             if _usable_id(clean) not in live:
                 self.todos.append(clean)
             self.notifiedIds = [x for x in self.notifiedIds
@@ -1431,13 +1366,14 @@ def cmd_commit(_args) -> int:
     judged = {str(x) for x in findings.get("judgedIds", [])} - deferred_ids
     resolved = notified | judged | {str(x.get("id")) for x in failed}
 
-    # The shape the queues hold, for everything actually pushed this round, so
-    # 重要事項 can show what the toast said. pendingNotify comes first so a fresh
-    # report wins the field-level merge in record_notices.
+    # The shape the queues hold, for everything actually pushed this round, so a
+    # pushed mail with no todo can wait in 待分類 showing what the toast said.
+    # pendingNotify comes first so a fresh report wins the merge in
+    # pushed_as_todos.
     #
     # This has to stay above `notified |= ticked`. Once the ticks are folded in,
     # a message that was only ticked and never pushed also passes the test
-    # below, and would be filed as a notice for work just finished.
+    # below, and would come back as a todo for work just finished.
     pushed = [x for x in (list(state.pendingNotify)
                           + findings.get("important", [])
                           + findings.get("failedNotify", []))
@@ -1447,23 +1383,17 @@ def cmd_commit(_args) -> int:
     purged = state.purge_archive(now)
     archived, archive_blocked = state.consume_checked()
     ticked = {str(t.get("id")) for t in archived}
-    # After consume_checked, so a tick has already withdrawn its notice and a
-    # stale promote click cannot resurrect the message.
+    # The filter belongs here rather than in `pushed` itself. A retry can
+    # genuinely succeed while the user ticks the same message between begin and
+    # commit, so the push is real and `pushed` rightly holds it. Turning it into
+    # a todo anyway would put finished work straight back in 待分類.
     #
-    # The filter belongs here rather than in `pushed` itself, and catches the
-    # opposite case: a retry can genuinely succeed while the user ticks the same
-    # message between begin and commit, so the push is real and `pushed` rightly
-    # holds it. Filing a notice anyway archives the work and hands back a button
-    # that resurrects it.
-    #
-    # `ticked` is deliberately not subtracted from reported_todos:
-    # reconcile_todos already drops a ticked id from the todo list, and
-    # `pushed` above is already filtered by it, so a message in both sets
-    # files no notice either way.
-    reported_todos = {k for k in (_usable_id(t) for t in findings.get("todos", []))
-                      if k is not None}
-    notice = state.settle_notices(
-        [p for p in pushed if str(p.get("id")) not in ticked], now, reported_todos)
+    # `ticked` is deliberately not subtracted from reported_ids:
+    # reconcile_todos already drops a ticked id from the todo list.
+    reported = findings.get("todos", [])
+    reported_ids = {k for k in (_usable_id(t) for t in reported) if k is not None}
+    filed = state.pushed_as_todos(
+        [p for p in pushed if str(p.get("id")) not in ticked], reported_ids)
     # A tick is the authoritative end of that message. Without clearing the park
     # queues too, the next round would re-report it as debt and resurrect a todo
     # the user already completed.
@@ -1473,7 +1403,10 @@ def cmd_commit(_args) -> int:
     state.notifiedIds = (state.notifiedIds + sorted(notified))[-NOTIFIED_KEEP:]
     state.reconcile_notify(failed, notified)
     state.reconcile_judge(findings.get("defer", []), resolved)
-    state.reconcile_todos(findings.get("todos", []), ticked)
+    state.reconcile_todos(reported + filed, ticked)
+    # After reconcile_todos, so a level lands on the final list and a todo
+    # ticked this round is already gone when its level is looked up.
+    triaged, triage_blocked = state.consume_triage()
 
     announce = (bool(state.coverage.intervals) and
                 state.roundSeq - state.lastBacklogNoticeRound >= BACKLOG_NOTICE_EVERY)
@@ -1490,6 +1423,7 @@ def cmd_commit(_args) -> int:
     # so a fault begin never saw can't consume an alert nobody was shown.
     new_todos = sum(1 for t in state.todos
                     if int(t.get("createdRound", 0)) == state.roundSeq)
+    untriaged = state.untriaged_count()
     config_status = read_config()["status"]
     owed = (prog.config_seen != "present"
             and prog.config_seen != state.lastConfigStatus)
@@ -1513,18 +1447,14 @@ def cmd_commit(_args) -> int:
           "pendingJudge": len(state.pendingJudge),
           "todos": len(state.todos),
           "newTodosThisRound": new_todos,
-          # Both halves are decided here rather than left to the round's own
-          # arithmetic, so a cold reader cannot get the quiet-hours window
-          # wrong and pop a browser at 06:25.
-          "shouldOpenTodoList": (new_todos > 0 or notice["newNotices"] > 0)
-          and within_gui_hours(time.localtime(now).tm_hour, GUI_OPEN_HOURS),
-          "notices": len(state.notices),
-          "newNoticesThisRound": notice["newNotices"],
-          "noticesSkippedAsTodo": notice["skippedAsTodo"],
-          "promotedThisRound": len(notice["promoted"]),
-          "promoteBlocked": notice["promoteBlocked"],
-          "sweptToArchive": notice["swept"],
-          "sweepBlocked": notice["sweepBlocked"],
+          "filedFromPushThisRound": len(filed),
+          # Decided here rather than left to the round's own arithmetic. Mail
+          # left in 待分類 reopens the list every round until the user files
+          # it, which is the point: nothing leaves that section by itself.
+          "shouldOpenTodoList": untriaged > 0,
+          "untriaged": untriaged,
+          "triagedThisRound": triaged,
+          "triageBlocked": triage_blocked,
           "archivedThisRound": len(archived),
           "restoredThisRound": len(restored),
           "restoreBlocked": restore_blocked,
