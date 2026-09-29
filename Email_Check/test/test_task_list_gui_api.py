@@ -33,6 +33,7 @@ tg.CHECKED_PATH = os.path.join(work, "tasks-checked.json")
 tg.ARCHIVE_PATH = os.path.join(work, "tasks-archive.json")
 tg.RESTORE_PATH = os.path.join(work, "tasks-restore.json")
 tg.TRIAGE_PATH = os.path.join(work, "tasks-triage.json")
+tg.FOLLOW_PATH = os.path.join(work, "tasks-follow.json")
 tg.app.config["TESTING"] = True
 cli = tg.app.test_client()
 
@@ -224,8 +225,68 @@ check("restoring something already purged is refused",
 r = cli.post("/api/restore", json={})
 check("restoring with no id is a bad request", r.status_code == 400, r.status_code)
 
+# --- /api/follow and the 追蹤中 fields /api/todos serves ---
+clear(tg.TRIAGE_PATH, tg.CHECKED_PATH, tg.FOLLOW_PATH)
+write(tg.STATE_PATH, {"roundSeq": 20, "todos": [
+    {"id": "w1", "subject": "waiting two days", "priority": "normal",
+     "followSince": NOW - int(2.5 * DAY)},
+    {"id": "w2", "subject": "waiting three days", "priority": "urgent",
+     "followSince": NOW - 3 * DAY - 60},
+    {"id": "w3", "subject": "bad stamp", "priority": "normal", "followSince": "soon"},
+    {"id": "f1", "subject": "filed", "priority": "important"},
+    {"id": "u1", "subject": "unfiled"}]})
+rows = by_id(cli.get("/api/todos").get_json()["todos"])
+check("a stamped filed todo is served as following, with whole days",
+      (rows["w1"]["following"], rows["w1"]["followDays"], rows["w1"]["followAlert"])
+      == (True, 2, False), rows["w1"])
+check("three days turns it red", rows["w2"]["followAlert"] is True, rows["w2"])
+check("an unusable stamp reads as fresh, never as overdue",
+      (rows["w3"]["following"], rows["w3"]["followDays"]) == (True, 0), rows["w3"])
+check("an unstamped todo is not following", rows["f1"]["following"] is False, rows["f1"])
+
+r = cli.post("/api/follow", json={"id": "f1", "follow": True})
+check("a filed todo can be followed", r.get_json()["ok"] is True, r.get_json())
+check("the request lands in its own file",
+      read(tg.FOLLOW_PATH)["follow"] == {"f1": True} and bool(read(tg.FOLLOW_PATH).get("rev")),
+      read(tg.FOLLOW_PATH))
+rows = by_id(cli.get("/api/todos").get_json()["todos"])
+check("a queued follow moves the row at once, with no age until the round stamps it",
+      (rows["f1"]["following"], rows["f1"]["pendingFollow"], rows["f1"]["followDays"])
+      == (True, True, 0), rows["f1"])
+r = cli.post("/api/follow", json={"id": "w2", "follow": False})
+rows = by_id(cli.get("/api/todos").get_json()["todos"])
+check("回到待辦 moves it back at once and keeps its level",
+      (rows["w2"]["following"], rows["w2"]["priority"], rows["w2"]["followAlert"])
+      == (False, "urgent", False), rows["w2"])
+r = cli.post("/api/follow", json={"id": "u1", "follow": True})
+check("an unfiled todo is refused", r.status_code == 409, r.get_json())
+cli.post("/api/triage", json={"id": "u1", "level": "normal"})
+r = cli.post("/api/follow", json={"id": "u1", "follow": True})
+check("but one with a queued level is accepted", r.get_json()["ok"] is True, r.get_json())
+cli.post("/api/triage", json={"id": "u1", "level": ""})
+check("重新分類 withdraws a queued follow, or it would fire once the todo is re-filed",
+      "u1" not in read(tg.FOLLOW_PATH)["follow"], read(tg.FOLLOW_PATH))
+cli.post("/api/triage", json={"id": "u1", "level": "normal"})
+cli.post("/api/follow", json={"id": "u1", "follow": True})
+r = cli.post("/api/follow", json={"id": "f1", "follow": "yes"})
+check("a non-boolean is a bad request", r.status_code == 400, r.status_code)
+r = cli.post("/api/follow", json={"id": "nope", "follow": True})
+check("following a todo that is gone is refused",
+      r.status_code == 409 and r.get_json()["gone"] is True, r.get_json())
+
+# The round applied f1 and w2, and w1 left the list.
+write(tg.STATE_PATH, {"roundSeq": 21, "todos": [
+    {"id": "f1", "subject": "filed", "priority": "important", "followSince": NOW},
+    {"id": "w2", "subject": "waiting three days", "priority": "urgent"},
+    {"id": "u1", "subject": "unfiled"}]})
+write(tg.FOLLOW_PATH, {"follow": {"f1": True, "w2": False, "w1": False, "u1": True}})
+cli.get("/api/todos")
+check("a follow drops once state.json carries it, and so does one for a todo that left",
+      read(tg.FOLLOW_PATH)["follow"] == {"u1": True}, read(tg.FOLLOW_PATH))
+
 # --- a missing state.json must serve an empty list, not a 500 ---
-clear(tg.STATE_PATH, tg.ARCHIVE_PATH, tg.CHECKED_PATH, tg.RESTORE_PATH, tg.TRIAGE_PATH)
+clear(tg.STATE_PATH, tg.ARCHIVE_PATH, tg.CHECKED_PATH, tg.RESTORE_PATH, tg.TRIAGE_PATH,
+      tg.FOLLOW_PATH)
 d = cli.get("/api/todos").get_json()
 check("a first run with no state file still serves", d["todos"] == [], d)
 check("and no request file was created just by reading",
@@ -243,6 +304,14 @@ check("the four choices are all there", all(f"'{w}'" in page for w in ("緊急",
 check("the level buttons are built in one place only, which is 待分類",
       page.count("for(const [lv, name] of LEVELS)") == 1)
 check("a filed row offers 重新分類 instead", "button('重新分類'" in page)
+check("追蹤中 sits between 待辦清單 and 已封存",
+      page.index("待辦清單 <span") < page.index("追蹤中 <span") < page.index("已封存 <span"))
+check("轉追蹤 and 回到待辦 both post to the follow endpoint",
+      "button('轉追蹤'" in page and "button('回到待辦'" in page
+      and page.count("'/api/follow'") == 2)
+check("the red threshold is the server's constant, not a second copy",
+      "__FOLLOW_DAYS__" not in page
+      and f"const FOLLOW_DAYS = {tg.FOLLOW_ALERT_DAYS};" in page)
 check("an alias mailbox is labelled rather than left looking unresolved",
       "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",

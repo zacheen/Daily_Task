@@ -35,17 +35,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state.json")
 ROUND_PATH = os.path.join(HERE, "round.json")
 PROGRESS_PATH = os.path.join(HERE, "round-progress.json")
-# The GUI is the only writer of the three request files below and only ever
+# The GUI is the only writer of the four request files below and only ever
 # reads state.json and the archive, so no file has two writers and no
 # cross-process lock is needed. Each one is a verb the user aimed at a row:
 # ticked means done, restore means un-archive, triage means file this todo
-# under a level, or send it back to 待分類. All three are read here.
-# All four files now live in task_list/, alongside the viewer.
+# under a level, or send it back to 待分類, and follow means move a filed todo
+# to 追蹤中 or back to 待辦清單. All four are read here.
+# All five files live in task_list/, alongside the viewer.
 TASK_LIST_DIR = os.path.join(HERE, "task_list")
 CHECKED_PATH = os.path.join(TASK_LIST_DIR, "tasks-checked.json")
 ARCHIVE_PATH = os.path.join(TASK_LIST_DIR, "tasks-archive.json")
 RESTORE_PATH = os.path.join(TASK_LIST_DIR, "tasks-restore.json")
 TRIAGE_PATH = os.path.join(TASK_LIST_DIR, "tasks-triage.json")
+FOLLOW_PATH = os.path.join(TASK_LIST_DIR, "tasks-follow.json")
 CONFIG_PATH = os.path.join(HERE, "config.json")
 
 MAX_RESULTS = 40
@@ -78,6 +80,9 @@ BACKLOG_NOTICE_EVERY = 3
 # GUI's sort order. A todo with none of them is 待分類 and stays there until the
 # user picks one, so nothing leaves that section on a clock.
 PRIORITIES = ("urgent", "important", "normal")
+# Todo fields only the user's GUI requests may set. A round's report carrying
+# either is ignored field by field.
+USER_OWNED = ("priority", "followSince")
 NOTIFIED_KEEP = 100
 # How long an archived todo stays recoverable. Three days to notice a mis-tick,
 # then it is gone for good.
@@ -300,8 +305,9 @@ def _write_archive(items: list, expect_rev: Any) -> bool:
 def _read_id_request(path: str, key: str, fault: str) -> tuple[set[str], str, Any]:
     """Ids the GUI asked for, why they could not be read, and the file's rev.
 
-    Every GUI-written request file goes through here, in the same (data, error,
-    rev) shape as _read_archive, so the three of them cannot drift apart.
+    Every GUI-written id-set request goes through here, in the same (data, error,
+    rev) shape as _read_archive, so they cannot drift apart. The two keyed by
+    id with a value per id use _read_map_request instead.
 
     A non-empty reason means "unknown", never "nothing requested": acting on a
     file that could not be read would archive or restore on no evidence. An
@@ -322,22 +328,34 @@ def _read_ticks() -> tuple[set[str], str, Any]:
     return _read_id_request(CHECKED_PATH, "checkedIds", "tick file unreadable")
 
 
-def _read_triage() -> tuple[dict[str, str], str]:
-    """Levels the GUI asked for, keyed by message id, plus why they were unreadable.
+def _read_map_request(path: str, key: str, fault: str) -> tuple[dict[str, Any], str]:
+    """A per-id request map from the GUI, plus why it was unreadable.
 
     A map rather than an id set, so it cannot share _read_id_request. It keeps
     the same contract: an unreadable file means unknown, never "nothing asked".
     """
     try:
-        with open(TRIAGE_PATH, encoding="utf-8") as fh:
-            levels = json.load(fh).get("levels", {})
-        if not isinstance(levels, dict):
-            raise ValueError("levels is not an object")
-        return {str(k): str(v) for k, v in levels.items()}, ""
+        with open(path, encoding="utf-8") as fh:
+            found = json.load(fh).get(key, {})
+        if not isinstance(found, dict):
+            raise ValueError(f"{key} is not an object")
+        return {str(k): v for k, v in found.items()}, ""
     except FileNotFoundError:
         return {}, ""
     except Exception:
-        return {}, "triage file unreadable"
+        return {}, fault
+
+
+def _read_triage() -> tuple[dict[str, str], str]:
+    levels, err = _read_map_request(TRIAGE_PATH, "levels", "triage file unreadable")
+    return {k: str(v) for k, v in levels.items()}, err
+
+
+def _read_follow() -> tuple[dict[str, bool], str]:
+    """True asks for 追蹤中, false for back to 待辦清單. Anything that is not a
+    JSON boolean is dropped, since bool("false") would read as a yes."""
+    wanted, err = _read_map_request(FOLLOW_PATH, "follow", "follow file unreadable")
+    return {k: v for k, v in wanted.items() if isinstance(v, bool)}, err
 
 
 def _merge(prior: dict, latest: dict) -> dict:
@@ -648,10 +666,12 @@ class State:
         It stays because the invariant it protects is the expensive one, and
         because any future writer would otherwise silently lose it.
 
-        `priority` is stripped from every report, so the user's triage is its
-        only source and an upsert keeps whatever level the list already had.
+        `priority` and `followSince` are stripped from every report, so the
+        user's triage and follow requests are their only source and an upsert
+        keeps whatever the list already had.
         """
-        reported = [{k: v for k, v in r.items() if k != "priority"} for r in reported]
+        reported = [{k: v for k, v in r.items() if k not in USER_OWNED}
+                    for r in reported]
         kept: dict[str, dict] = {}
         orphans: dict[str, dict] = {}
         for item in list(self.todos) + list(reported):
@@ -722,6 +742,39 @@ class State:
                 changed += 1
             elif want == "" and "priority" in todo:
                 del todo["priority"]
+                # Or filing it again later would drop it straight into 追蹤中.
+                todo.pop("followSince", None)
+                changed += 1
+        return changed, ""
+
+    def consume_follow(self, now: int) -> tuple[int, str]:
+        """Move filed todos into 追蹤中 or back out. Returns how many changed,
+        plus why the request could not be read.
+
+        `followSince` is the whole flag. It is stamped here rather than at the
+        click, so a row's age counts from the round that applied it, up to one
+        slot late. The level is never touched, which is what lets 回到待辦
+        return a todo to the level it left with.
+
+        A todo with no level is refused, because the GUI files 追蹤中 only
+        from 待辦清單, and a flagged todo with no level would drop out of
+        untriaged_count while sitting in neither section. Run this after
+        consume_triage, so a row filed and followed in the same round lands.
+        """
+        wanted, err = _read_follow()
+        if err:
+            return 0, err
+        changed = 0
+        for todo in self.todos:
+            key = _usable_id(todo)
+            if key is None or key not in wanted:
+                continue
+            if wanted[key] and "followSince" not in todo \
+                    and todo.get("priority") in PRIORITIES:
+                todo["followSince"] = now
+                changed += 1
+            elif not wanted[key] and "followSince" in todo:
+                del todo["followSince"]
                 changed += 1
         return changed, ""
 
@@ -819,7 +872,10 @@ class State:
 
         live = {_usable_id(t) for t in self.todos}
         for item in back:
-            clean = {k: v for k, v in item.items() if k != "archivedAt"}
+            # followSince goes too, so a todo archived from 追蹤中 comes back
+            # to 待辦清單 rather than resuming an age that kept counting.
+            clean = {k: v for k, v in item.items()
+                     if k not in ("archivedAt", "followSince")}
             try:
                 archived_at = int(item.get("archivedAt", 0))
             except (TypeError, ValueError):
@@ -1407,6 +1463,7 @@ def cmd_commit(_args) -> int:
     # After reconcile_todos, so a level lands on the final list and a todo
     # ticked this round is already gone when its level is looked up.
     triaged, triage_blocked = state.consume_triage()
+    followed, follow_blocked = state.consume_follow(now)
 
     announce = (bool(state.coverage.intervals) and
                 state.roundSeq - state.lastBacklogNoticeRound >= BACKLOG_NOTICE_EVERY)
@@ -1455,6 +1512,8 @@ def cmd_commit(_args) -> int:
           "untriaged": untriaged,
           "triagedThisRound": triaged,
           "triageBlocked": triage_blocked,
+          "followedThisRound": followed,
+          "followBlocked": follow_blocked,
           "archivedThisRound": len(archived),
           "restoredThisRound": len(restored),
           "restoreBlocked": restore_blocked,

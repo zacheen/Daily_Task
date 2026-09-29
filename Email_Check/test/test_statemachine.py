@@ -214,6 +214,7 @@ sm.ARCHIVE_PATH = os.path.join(work, "tasks-archive.json")
 # until task_list/ made the write fail; before then, a test below quietly wrote
 # a real request file the next scheduled round would have consumed.
 sm.TRIAGE_PATH = os.path.join(work, "tasks-triage.json")
+sm.FOLLOW_PATH = os.path.join(work, "tasks-follow.json")
 
 st12 = sm.State({"horizon": 100, "roundSeq": 6})
 st12.reconcile_todos([{"id": "t1", "subject": "OA link", "action": "do the OA"}], set())
@@ -1354,6 +1355,80 @@ check("and reports it, with nothing left in 待分類 to open the list for",
       (held[-1]["triagedThisRound"], held[-1]["triageBlocked"], held[-1]["untriaged"],
        held[-1]["shouldOpenTodoList"]) == (1, "", 0, False), held[-1])
 _clear(sm.TRIAGE_PATH)
+
+# --- 追蹤中 is a stamp beside the level, never a level of its own ---
+_clear(sm.FOLLOW_PATH, sm.TRIAGE_PATH)
+st80 = sm.State({"horizon": 100, "roundSeq": 80, "triageSince": 1,
+                 "todos": [{"id": "f", "action": "sent the form", "priority": "important"},
+                           {"id": "back", "action": "got the reply", "priority": "urgent",
+                            "followSince": 500},
+                           {"id": "raw", "action": "never filed"},
+                           {"id": "odd", "action": "string flag", "priority": "normal"},
+                           {"subject": "no id", "priority": "normal"}]})
+check("with no follow file nothing changes", st80.consume_follow(1000) == (0, ""))
+json.dump({"follow": {"f": True, "back": False, "raw": True, "odd": "false",
+                      "gone": True}}, open(sm.FOLLOW_PATH, "w", encoding="utf-8"))
+changed80, err80 = st80.consume_follow(1000)
+by80 = {t.get("id"): t for t in st80.todos}
+check("a follow stamps the round's time and keeps the level",
+      (by80["f"].get("followSince"), by80["f"]["priority"]) == (1000, "important"), by80["f"])
+check("回到待辦 drops the stamp and the todo keeps the level it left with",
+      "followSince" not in by80["back"] and by80["back"]["priority"] == "urgent", by80["back"])
+check("a todo with no level is refused, so it cannot hide outside 待分類",
+      "followSince" not in by80["raw"] and st80.untriaged_count() == 1, by80["raw"])
+check("a string value is not read as a yes", "followSince" not in by80["odd"], by80["odd"])
+check("only real changes count", (changed80, err80) == (2, ""), (changed80, err80))
+check("an id-less todo is never touched", "followSince" not in st80.todos[-1], st80.todos[-1])
+st80.consume_follow(9999)
+check("following again does not restart the clock", by80["f"]["followSince"] == 1000,
+      by80["f"])
+open(sm.FOLLOW_PATH, "w").write("{ broken")
+check("an unreadable follow file reports instead of guessing",
+      st80.consume_follow(1000) == (0, "follow file unreadable"))
+_clear(sm.FOLLOW_PATH)
+
+st81 = sm.State({"horizon": 100, "roundSeq": 81, "triageSince": 1,
+                 "todos": [{"id": "k", "action": "old", "priority": "normal",
+                            "followSince": 700}]})
+st81.reconcile_todos([{"id": "k", "action": "new", "followSince": 1},
+                      {"id": "n", "action": "fresh", "followSince": 1}], set())
+by81 = {t["id"]: t for t in st81.todos}
+check("a report can neither move nor start a follow",
+      by81["k"]["followSince"] == 700 and "followSince" not in by81["n"], st81.todos)
+json.dump({"levels": {"k": ""}}, open(sm.TRIAGE_PATH, "w", encoding="utf-8"))
+st81.consume_triage()
+check("重新分類 clears the stamp too, so re-filing lands in 待辦清單",
+      "followSince" not in by81["k"] and "priority" not in by81["k"], by81["k"])
+_clear(sm.TRIAGE_PATH)
+
+# Filed and followed in one round, then through commit and the restore path.
+_clear(sm.ARCHIVE_PATH, sm.CHECKED_PATH, sm.RESTORE_PATH, sm.TRIAGE_PATH, sm.FOLLOW_PATH)
+sm.State({"horizon": 100, "roundSeq": 82, "triageSince": 1,
+          "todos": [{"id": "q", "action": "file then follow"}]}).save()
+sm.Progress(200).save()
+json.dump({}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+json.dump({"levels": {"q": "normal"}}, open(sm.TRIAGE_PATH, "w", encoding="utf-8"))
+json.dump({"follow": {"q": True}}, open(sm.FOLLOW_PATH, "w", encoding="utf-8"))
+held.clear()
+_was82 = sm.emit
+sm.emit = held.append
+sm.cmd_commit(None)
+sm.emit = _was82
+a82 = json.load(open(sm.STATE_PATH, encoding="utf-8"))["todos"][0]
+check("a level and a follow queued together both land, triage first",
+      a82.get("priority") == "normal" and isinstance(a82.get("followSince"), int), a82)
+check("commit reports the follow",
+      (held[-1]["followedThisRound"], held[-1]["followBlocked"],
+       held[-1]["shouldOpenTodoList"]) == (1, "", False), held[-1])
+_clear(sm.TRIAGE_PATH, sm.FOLLOW_PATH)
+_write_archive([dict(a82, archivedAt=2000)])
+json.dump({"restoreIds": ["q"]}, open(sm.RESTORE_PATH, "w", encoding="utf-8"))
+st83 = sm.State({"horizon": 100, "roundSeq": 83, "triageSince": 1})
+st83.consume_restores()
+check("a todo archived from 追蹤中 is restored to 待辦清單 at its level",
+      [(t.get("priority"), "followSince" in t) for t in st83.todos] == [("normal", False)],
+      st83.todos)
+_clear(sm.ARCHIVE_PATH, sm.RESTORE_PATH)
 
 # --- a restored todo comes back at its level, old untriaged mail as 普通 ---
 _clear(sm.ARCHIVE_PATH, sm.RESTORE_PATH)

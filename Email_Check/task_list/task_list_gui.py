@@ -9,17 +9,19 @@ killed when the first one closes. A closing page's beacon drops its id
 immediately; the ping timeout is only a backstop for closes that send no
 beacon at all (crash, sleep, a discarded background tab).
 
-Writer discipline is the whole design. This process writes the three request
+Writer discipline is the whole design. This process writes the four request
 files and nothing else, and only ever reads `state.json` and the archive.
 statemachine.py is the reverse. With one writer per file plus atomic replace, a
 reader always sees a complete old or complete new file and no lock is needed.
 
 Each request file is one verb the user can aim at a row. A tick says done, and
-待分類's 封存 is the same tick. A restore says un-archive that. A triage says
-file this todo under a level, or send it back to 待分類. None of them takes
-effect until the next scheduled round reads it, which is why every button
-says 已排定 rather than claiming it is finished. A queued level shows at once
-anyway, since the row has to move to the section it now belongs in.
+待分類's and 追蹤中's 封存 are the same tick. A restore says un-archive that. A
+triage says file this todo under a level, or send it back to 待分類. A follow
+says move a filed todo to 追蹤中, or back to 待辦清單 at the level it left
+with. None of them takes effect until the next scheduled round reads it, which
+is why every button says 已排定 rather than claiming it is finished. A queued
+level or follow shows at once anyway, since the row has to move to the section
+it now belongs in.
 
 A tick is persisted on the request that carries it, not on window close, so
 killing the process cannot lose one. The page reports per-row save state
@@ -45,18 +47,21 @@ from flask import Flask, jsonify, request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # state.json lives one level up because statemachine.py owns it and the rest of
-# the Email_Check task reads it too. Only the four files below are this
+# the Email_Check task reads it too. Only the five files below are this
 # folder's, which is also where _atomic_write puts its temp file.
 STATE_PATH = os.path.join(os.path.dirname(HERE), "state.json")
 CHECKED_PATH = os.path.join(HERE, "tasks-checked.json")
 ARCHIVE_PATH = os.path.join(HERE, "tasks-archive.json")
 RESTORE_PATH = os.path.join(HERE, "tasks-restore.json")
 TRIAGE_PATH = os.path.join(HERE, "tasks-triage.json")
+FOLLOW_PATH = os.path.join(HERE, "tasks-follow.json")
 # Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
 # order of 待辦清單. A todo with none of these is 待分類.
 PRIORITIES = ("urgent", "important", "normal")
 # Mirrors ARCHIVE_TTL in statemachine.py, for showing days remaining.
 ARCHIVE_TTL_DAYS = 3
+# A 追蹤中 row this many days old turns red, since nobody has answered yet.
+FOLLOW_ALERT_DAYS = 3
 HOST, PORT = "127.0.0.1", 8765
 # Long enough for a cold browser start on a busy machine. Exceeded with no page
 # ever connecting means the browser never came up, so exit rather than idle.
@@ -168,21 +173,29 @@ def load_triage() -> dict[str, str]:
     return {str(k): str(v) for k, v in levels.items()} if isinstance(levels, dict) else {}
 
 
-def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str]]:
-    """Drop requests that are done or aimed at nothing. Returns the ticks and
-    levels left.
+def load_follow() -> dict[str, bool]:
+    wanted = _read_json(FOLLOW_PATH, {}).get("follow", {})
+    if not isinstance(wanted, dict):
+        return {}
+    return {str(k): v for k, v in wanted.items() if isinstance(v, bool)}
 
-    All three request files need this: each would otherwise grow forever, and a
+
+def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[str, bool]]:
+    """Drop requests that are done or aimed at nothing. Returns the ticks,
+    levels and follows left.
+
+    All four request files need this: each would otherwise grow forever, and a
     message id reused by a future todo or archive entry would arrive already
-    ticked, already flagged for restore, or already filed.
+    ticked, already flagged for restore, already filed or already followed.
 
-    A level is dropped once state.json carries it, which is how the page stops
-    showing it as 已排定. Nothing is dropped before that, so a click the round
-    has not read yet cannot be lost here.
+    A level or follow is dropped once state.json carries it, which is how the
+    page stops showing it as 已排定. Nothing is dropped before that, so a click
+    the round has not read yet cannot be lost here.
     """
     rows = [t for t in todos if isinstance(t, dict) and _usable_id(t)]
     live_ids = {_usable_id(t) for t in rows}
     stored = {_usable_id(t): str(t.get("priority") or "") for t in rows}
+    stored_follow = {_usable_id(t): "followSince" in t for t in rows}
 
     archived_ids = {_usable_id(a) for a in _read_json(ARCHIVE_PATH, {}).get("archived", [])
                     if isinstance(a, dict)}
@@ -198,11 +211,17 @@ def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str]]:
     if live_levels != levels:
         _atomic_write(TRIAGE_PATH, {"levels": live_levels, "rev": _next_rev()})
 
+    follows = load_follow()
+    live_follows = {tid: want for tid, want in follows.items()
+                    if tid in live_ids and stored_follow[tid] != want}
+    if live_follows != follows:
+        _atomic_write(FOLLOW_PATH, {"follow": live_follows, "rev": _next_rev()})
+
     checked = load_checked()
     pruned = checked & live_ids
     if pruned != checked:
         _atomic_write(CHECKED_PATH, {"checkedIds": sorted(pruned), "rev": _next_rev()})
-    return pruned, live_levels
+    return pruned, live_levels, live_follows
 
 
 def _usable_id(item: dict) -> str | None:
@@ -250,7 +269,8 @@ def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
 
 @app.get("/")
 def index() -> str:
-    return PAGE.replace("__PING_MS__", str(PING_EVERY_MS))
+    return (PAGE.replace("__PING_MS__", str(PING_EVERY_MS))
+                .replace("__FOLLOW_DAYS__", str(FOLLOW_ALERT_DAYS)))
 
 
 def load_restores() -> set[str]:
@@ -342,7 +362,51 @@ def api_triage():
         levels = load_triage()
         levels[tid] = level
         _atomic_write(TRIAGE_PATH, {"levels": levels, "rev": _next_rev()})
+        # A queued follow the round will now refuse for want of a level would
+        # never prune, and would fire unasked once the todo is filed again.
+        follows = load_follow()
+        if not level and follows.pop(tid, None) is not None:
+            _atomic_write(FOLLOW_PATH, {"follow": follows, "rev": _next_rev()})
     return jsonify({"ok": True, "id": tid, "level": level, "pending": True})
+
+
+@app.post("/api/follow")
+def api_follow():
+    """Queue a move to 追蹤中 (true) or back to 待辦清單 (false).
+
+    Its own request file, like /api/triage, so state.json keeps one writer. A
+    todo with no level, stored or queued, is refused, because the state
+    machine refuses it too and the click would otherwise sit 已排定 forever.
+    """
+    body = request.get_json(silent=True) or {}
+    tid = str(body.get("id", "")).strip()
+    want = body.get("follow")
+    if not tid:
+        return jsonify({"ok": False, "error": "missing id"}), 400
+    if not isinstance(want, bool):
+        return jsonify({"ok": False, "error": "follow must be true or false"}), 400
+    with _lock:
+        todos = {_usable_id(t): t for t in load_todos() if isinstance(t, dict)}
+        todos.pop(None, None)
+        if tid not in todos:
+            return jsonify({"ok": False, "error": "gone", "gone": True}), 409
+        levels = load_triage()
+        level = levels[tid] if tid in levels else str(todos[tid].get("priority") or "")
+        if want and level not in PRIORITIES:
+            return jsonify({"ok": False, "error": "not filed"}), 409
+        follows = load_follow()
+        follows[tid] = want
+        _atomic_write(FOLLOW_PATH, {"follow": follows, "rev": _next_rev()})
+    return jsonify({"ok": True, "id": tid, "follow": want, "pending": True})
+
+
+def _follow_days(stamp, now: float) -> int:
+    """Whole days since followSince. An unusable stamp reads as fresh rather
+    than as overdue, so a bad value cannot paint a row red."""
+    try:
+        return max(0, int((now - int(stamp)) // 86400))
+    except (TypeError, ValueError):
+        return 0
 
 
 @app.get("/api/todos")
@@ -351,7 +415,8 @@ def api_todos():
     with _lock:
         state = _read_json(STATE_PATH, {})
         todos = [t for t in state.get("todos", []) if isinstance(t, dict)]
-        checked, levels = prune_requests(todos)
+        checked, levels, follows = prune_requests(todos)
+    now = time.time()
     rows = []
     for t in todos:
         tid = _usable_id(t)
@@ -359,6 +424,13 @@ def api_todos():
         # A queued level shows at once, so a filed row leaves 待分類 on the
         # click instead of on the next round.
         level = levels[tid] if tid in levels else stored
+        stamped = "followSince" in t
+        # Same for a queued follow. The level check mirrors consume_follow,
+        # which refuses a todo with none, so no row lands in 追蹤中 unfiled.
+        following = (follows[tid] if tid in follows else stamped) and level in PRIORITIES
+        # A queued follow has no stamp yet, so it shows no age until the round.
+        days = _follow_days(t.get("followSince"), now) if following and stamped \
+            and tid not in follows else 0
         rows.append({
             "id": tid or "",
             "tickable": tid is not None,
@@ -375,6 +447,10 @@ def api_todos():
             "checked": tid is not None and tid in checked,
             "priority": level if level in PRIORITIES else "",
             "pendingLevel": tid is not None and tid in levels,
+            "following": following,
+            "pendingFollow": tid is not None and tid in follows,
+            "followDays": days,
+            "followAlert": days >= FOLLOW_ALERT_DAYS,
         })
     # Level first, then a parsed date rather than the raw string, because
     # lexicographic order puts "10-2" before "9-15" and shows a later deadline
@@ -468,6 +544,10 @@ PAGE = """<!doctype html>
  .lv.important{background:#43351a;color:#ffc46b}
  .lv.normal{background:#262a31;color:#aab0b7}
  .pend{color:#8b9096;font-size:11px;padding-top:6px}
+ .age{color:#8b9096}
+ .row.stale{border-color:#8a3035;background:#2a1b1e}
+ .age.stale{color:#ff7a7a;font-weight:600}
+ #secfollow .hd{color:#c9a0ff}
  .btn.urgent{border-color:#6b2c30;color:#ff9a9a}
  .btn.important{border-color:#6b5226;color:#ffcf85}
  .btn{background:#23272e;border:1px solid #383d45;color:#cfd4da;border-radius:7px;
@@ -492,6 +572,10 @@ PAGE = """<!doctype html>
     <div class=hd>待辦清單 <span class=n id=cntold></span></div>
     <div id=listold></div>
   </div>
+  <div class=sec id=secfollow>
+    <div class=hd>追蹤中 <span class=n id=cntfollow></span></div>
+    <div id=listfollow></div>
+  </div>
   <div class=sec id=secarch>
     <div class=hd>已封存 <span class=n id=cntarch></span>
       <span class=tog id=togarch>展開</span></div>
@@ -502,6 +586,7 @@ PAGE = """<!doctype html>
 <script>
 const el = (t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
 const ARCH_DAYS = 3;
+const FOLLOW_DAYS = __FOLLOW_DAYS__;
 // One id per page. The server counts open pages, so a second tab must not
 // reuse this one or closing either tab would look like closing both.
 const CID = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()));
@@ -512,17 +597,24 @@ async function load(){
   catch(e){ document.getElementById('sub').textContent =
       '讀不到資料，伺服器已經關閉。重新啟動 task_list_gui.py'; return; }
   const fresh = d.todos.filter(t=>!t.priority);
-  const filed = d.todos.filter(t=>t.priority);
+  const filed = d.todos.filter(t=>t.priority && !t.following);
+  // Longest wait first, so the red rows lead. The sort is stable, so ties
+  // keep the server's level-then-deadline order.
+  const tracked = d.todos.filter(t=>t.following)
+    .sort((a,b)=>(a.checked-b.checked) || (b.followDays-a.followDays));
   const waiting = fresh.filter(t=>!t.checked).length;
   const open = filed.filter(t=>!t.checked).length;
+  const watching = tracked.filter(t=>!t.checked).length;
   const done = d.todos.filter(t=>t.checked).length;
   document.getElementById('sub').textContent =
-    `${waiting} 項待分類，${open} 項待辦` + (done ? `，${done} 項已排定封存` : '');
+    `${waiting} 項待分類，${open} 項待辦，${watching} 項追蹤中`
+    + (done ? `，${done} 項已排定封存` : '');
   document.getElementById('foot').textContent =
-    `分類、勾選或封存都在下次排程更新時才生效，在那之前都還可以反悔。已封存 ${d.archivedTotal} 項。`;
+    `分類、勾選、追蹤或封存都在下次排程更新時才生效，在那之前都還可以反悔。追蹤滿 ${FOLLOW_DAYS} 天會變紅。已封存 ${d.archivedTotal} 項。`;
 
   fill('listnew', 'cntnew', fresh, '沒有待分類的信', triageRow);
   fill('listold', 'cntold', filed, '目前沒有待辦', row);
+  fill('listfollow', 'cntfollow', tracked, '沒有追蹤中的項目', followRow);
   loadArchive();
 }
 
@@ -654,6 +746,15 @@ function cardBody(t){
                    meta.append(u, document.createTextNode('  ')); }
   if(!t.tickable){ const n=el('span','flag'); n.textContent='缺 id 無法操作';
                    meta.append(n, document.createTextNode('  ')); }
+  if(t.pendingFollow){
+    meta.append(Object.assign(el('span','pend'),
+        {textContent: t.following ? '已排定追蹤' : '已排定回到待辦'}),
+      document.createTextNode('  '));
+  }else if(t.following){
+    const a = el('span','age' + (t.followAlert ? ' stale' : ''));
+    a.textContent = t.followDays ? `追蹤 ${t.followDays} 天` : '今天開始追蹤';
+    meta.append(a, document.createTextNode('  '));
+  }
   appendSource(meta, t);
   body.append(meta);
   return body;
@@ -678,8 +779,25 @@ function triageRow(t){
   return r;
 }
 
-// 待辦清單 offers only 已完成 and 重新分類, never the three levels, so a filed row
-// cannot be re-filed by a stray click. 重新分類 sends it back to 待分類.
+// 追蹤中 mirrors 待分類: no checkbox, and 封存 is the same queued tick, so the
+// row stays here with 取消 until the round reads it. 回到待辦 keeps the level.
+function followRow(t){
+  const r = el('div','row' + (t.checked?' done':'') + (t.followAlert?' stale':''));
+  const acts = el('div','acts');
+  const st = el('div','st');
+  if(t.tickable && t.checked){
+    acts.append(Object.assign(el('span','pend'),{textContent:'已排定封存'}),
+                button('取消', ()=>post('/api/check',{id:t.id,checked:false}), st));
+  }else if(t.tickable){
+    acts.append(button('回到待辦', ()=>post('/api/follow',{id:t.id,follow:false}), st),
+                button('封存', ()=>post('/api/check',{id:t.id,checked:true}), st));
+  }
+  r.append(cardBody(t), acts, st);
+  return r;
+}
+
+// 待辦清單 offers only 已完成, 轉追蹤 and 重新分類, never the three levels, so a
+// filed row cannot be re-filed by a stray click. 重新分類 sends it back to 待分類.
 function row(t){
   const r = el('div','row' + (t.checked?' done':''));
   const cb = el('input'); cb.type='checkbox'; cb.checked=t.checked;
@@ -688,7 +806,8 @@ function row(t){
   const acts = el('div','acts');
   const st = el('div','st');
   if(t.tickable)
-    acts.append(button('重新分類', ()=>post('/api/triage',{id:t.id,level:''}), st));
+    acts.append(button('轉追蹤', ()=>post('/api/follow',{id:t.id,follow:true}), st),
+                button('重新分類', ()=>post('/api/triage',{id:t.id,level:''}), st));
   acts.classList.toggle('hidden', t.checked);
   r.append(cb, cardBody(t), acts, st);
 
