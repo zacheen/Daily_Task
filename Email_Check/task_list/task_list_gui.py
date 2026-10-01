@@ -62,6 +62,8 @@ PRIORITIES = ("urgent", "important", "normal")
 ARCHIVE_TTL_DAYS = 3
 # A 追蹤中 row this many days old turns red, since nobody has answered yet.
 FOLLOW_ALERT_DAYS = 3
+# Upper bound on how far 延後提醒 can push a red row out.
+MAX_REMIND_DAYS = 60
 HOST, PORT = "127.0.0.1", 8765
 # Long enough for a cold browser start on a busy machine. Exceeded with no page
 # ever connecting means the browser never came up, so exit rather than idle.
@@ -173,14 +175,30 @@ def load_triage() -> dict[str, str]:
     return {str(k): str(v) for k, v in levels.items()} if isinstance(levels, dict) else {}
 
 
-def load_follow() -> dict[str, bool]:
+def _is_remind_at(value) -> bool:
+    """Mirror of the state machine's check. True is an int in Python, so bool
+    has to be ruled out by name."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def load_follow() -> dict[str, bool | int]:
+    """True, false, or the epoch a postponed reminder is due, per todo id."""
     wanted = _read_json(FOLLOW_PATH, {}).get("follow", {})
     if not isinstance(wanted, dict):
         return {}
-    return {str(k): v for k, v in wanted.items() if isinstance(v, bool)}
+    return {str(k): v for k, v in wanted.items()
+            if isinstance(v, bool) or _is_remind_at(v)}
 
 
-def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[str, bool]]:
+def _follow_applied(todo: dict, want) -> bool:
+    if want is False:
+        return "followSince" not in todo
+    if want is True:
+        return "followSince" in todo
+    return "followSince" in todo and todo.get("followRemindAt") == want
+
+
+def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[str, bool | int]]:
     """Drop requests that are done or aimed at nothing. Returns the ticks,
     levels and follows left.
 
@@ -195,7 +213,7 @@ def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[st
     rows = [t for t in todos if isinstance(t, dict) and _usable_id(t)]
     live_ids = {_usable_id(t) for t in rows}
     stored = {_usable_id(t): str(t.get("priority") or "") for t in rows}
-    stored_follow = {_usable_id(t): "followSince" in t for t in rows}
+    by_id = {_usable_id(t): t for t in rows}
 
     archived_ids = {_usable_id(a) for a in _read_json(ARCHIVE_PATH, {}).get("archived", [])
                     if isinstance(a, dict)}
@@ -213,7 +231,7 @@ def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[st
 
     follows = load_follow()
     live_follows = {tid: want for tid, want in follows.items()
-                    if tid in live_ids and stored_follow[tid] != want}
+                    if tid in live_ids and not _follow_applied(by_id[tid], want)}
     if live_follows != follows:
         _atomic_write(FOLLOW_PATH, {"follow": live_follows, "rev": _next_rev()})
 
@@ -270,7 +288,8 @@ def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
 @app.get("/")
 def index() -> str:
     return (PAGE.replace("__PING_MS__", str(PING_EVERY_MS))
-                .replace("__FOLLOW_DAYS__", str(FOLLOW_ALERT_DAYS)))
+                .replace("__FOLLOW_DAYS__", str(FOLLOW_ALERT_DAYS))
+                .replace("__MAX_REMIND__", str(MAX_REMIND_DAYS)))
 
 
 def load_restores() -> set[str]:
@@ -400,6 +419,46 @@ def api_follow():
     return jsonify({"ok": True, "id": tid, "follow": want, "pending": True})
 
 
+@app.post("/api/remind")
+def api_remind():
+    """Postpone a 追蹤中 row's reminder by a number of days from now.
+
+    Queued in the follow file as the due epoch, computed here at the click so
+    the wait for the next round does not stretch the delay the user typed.
+    """
+    body = request.get_json(silent=True) or {}
+    tid = str(body.get("id", "")).strip()
+    days = body.get("days")
+    if not tid:
+        return jsonify({"ok": False, "error": "missing id"}), 400
+    if isinstance(days, bool) or not isinstance(days, int) \
+            or not 1 <= days <= MAX_REMIND_DAYS:
+        return jsonify({"ok": False, "error": f"days must be 1 to {MAX_REMIND_DAYS}"}), 400
+    with _lock:
+        todos = {_usable_id(t): t for t in load_todos() if isinstance(t, dict)}
+        todos.pop(None, None)
+        if tid not in todos:
+            return jsonify({"ok": False, "error": "gone", "gone": True}), 409
+        follows = load_follow()
+        queued = follows.get(tid)
+        if queued is False or (queued is None and "followSince" not in todos[tid]):
+            return jsonify({"ok": False, "error": "not following"}), 409
+        follows[tid] = int(time.time()) + days * 86400
+        _atomic_write(FOLLOW_PATH, {"follow": follows, "rev": _next_rev()})
+    return jsonify({"ok": True, "id": tid, "remindAt": follows[tid], "pending": True})
+
+
+def _remind_at(todo: dict) -> int | None:
+    """When a stamped 追蹤中 row turns red, or None when its stamp is unusable,
+    which keeps a bad value from painting a row red."""
+    if _is_remind_at(todo.get("followRemindAt")):
+        return todo["followRemindAt"]
+    try:
+        return int(todo["followSince"]) + FOLLOW_ALERT_DAYS * 86400
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _follow_days(stamp, now: float) -> int:
     """Whole days since followSince. An unusable stamp reads as fresh rather
     than as overdue, so a bad value cannot paint a row red."""
@@ -425,12 +484,20 @@ def api_todos():
         # click instead of on the next round.
         level = levels[tid] if tid in levels else stored
         stamped = "followSince" in t
+        want = follows.get(tid) if tid is not None else None
         # Same for a queued follow. The level check mirrors consume_follow,
         # which refuses a todo with none, so no row lands in 追蹤中 unfiled.
-        following = (follows[tid] if tid in follows else stamped) and level in PRIORITIES
+        following = ((want is not False) if want is not None else stamped) \
+            and level in PRIORITIES
         # A queued follow has no stamp yet, so it shows no age until the round.
-        days = _follow_days(t.get("followSince"), now) if following and stamped \
-            and tid not in follows else 0
+        days = _follow_days(t.get("followSince"), now) if following and stamped else 0
+        # A queued postponement counts at once, so the row stops being red on
+        # the click rather than on the next round.
+        due = want if _is_remind_at(want) else (_remind_at(t) if stamped else None)
+        alert = bool(following and stamped and due is not None and now >= due)
+        postponed = _is_remind_at(want) or _is_remind_at(t.get("followRemindAt"))
+        remind_in = -int((now - due) // 86400) if following and postponed \
+            and due is not None and due > now else 0
         rows.append({
             "id": tid or "",
             "tickable": tid is not None,
@@ -448,9 +515,11 @@ def api_todos():
             "priority": level if level in PRIORITIES else "",
             "pendingLevel": tid is not None and tid in levels,
             "following": following,
-            "pendingFollow": tid is not None and tid in follows,
+            "pendingFollow": isinstance(want, bool),
+            "pendingRemind": _is_remind_at(want),
             "followDays": days,
-            "followAlert": days >= FOLLOW_ALERT_DAYS,
+            "followAlert": alert,
+            "remindIn": remind_in,
         })
     # Level first, then a parsed date rather than the raw string, because
     # lexicographic order puts "10-2" before "9-15" and shows a later deadline
@@ -538,7 +607,7 @@ PAGE = """<!doctype html>
       color:#7fb2ff;cursor:pointer;font-size:12px}
  .row.arch{opacity:.6}
  .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;flex:none;
-       max-width:240px}
+       max-width:300px}
  .lv{font-size:11px;font-weight:600;border-radius:5px;padding:1px 7px;margin-right:8px}
  .lv.urgent{background:#4a1f22;color:#ff8b8b}
  .lv.important{background:#43351a;color:#ffc46b}
@@ -548,6 +617,8 @@ PAGE = """<!doctype html>
  .row.stale{border-color:#8a3035;background:#2a1b1e}
  .age.stale{color:#ff7a7a;font-weight:600}
  #secfollow .hd{color:#c9a0ff}
+ .days{width:46px;background:#23272e;border:1px solid #383d45;color:#e8eaed;
+       border-radius:7px;padding:4px 6px;font-size:12px}
  .btn.urgent{border-color:#6b2c30;color:#ff9a9a}
  .btn.important{border-color:#6b5226;color:#ffcf85}
  .btn{background:#23272e;border:1px solid #383d45;color:#cfd4da;border-radius:7px;
@@ -587,6 +658,7 @@ PAGE = """<!doctype html>
 const el = (t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
 const ARCH_DAYS = 3;
 const FOLLOW_DAYS = __FOLLOW_DAYS__;
+const MAX_REMIND = __MAX_REMIND__;
 // One id per page. The server counts open pages, so a second tab must not
 // reuse this one or closing either tab would look like closing both.
 const CID = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()));
@@ -601,7 +673,8 @@ async function load(){
   // Longest wait first, so the red rows lead. The sort is stable, so ties
   // keep the server's level-then-deadline order.
   const tracked = d.todos.filter(t=>t.following)
-    .sort((a,b)=>(a.checked-b.checked) || (b.followDays-a.followDays));
+    .sort((a,b)=>(a.checked-b.checked) || (b.followAlert-a.followAlert)
+                 || (b.followDays-a.followDays));
   const waiting = fresh.filter(t=>!t.checked).length;
   const open = filed.filter(t=>!t.checked).length;
   const watching = tracked.filter(t=>!t.checked).length;
@@ -610,7 +683,7 @@ async function load(){
     `${waiting} 項待分類，${open} 項待辦，${watching} 項追蹤中`
     + (done ? `，${done} 項已排定封存` : '');
   document.getElementById('foot').textContent =
-    `分類、勾選、追蹤或封存都在下次排程更新時才生效，在那之前都還可以反悔。追蹤滿 ${FOLLOW_DAYS} 天會變紅。已封存 ${d.archivedTotal} 項。`;
+    `分類、勾選、追蹤或封存都在下次排程更新時才生效，在那之前都還可以反悔。追蹤滿 ${FOLLOW_DAYS} 天會變紅，變紅後可以延後提醒。已封存 ${d.archivedTotal} 項。`;
 
   fill('listnew', 'cntnew', fresh, '沒有待分類的信', triageRow);
   fill('listold', 'cntold', filed, '目前沒有待辦', row);
@@ -752,7 +825,8 @@ function cardBody(t){
       document.createTextNode('  '));
   }else if(t.following){
     const a = el('span','age' + (t.followAlert ? ' stale' : ''));
-    a.textContent = t.followDays ? `追蹤 ${t.followDays} 天` : '今天開始追蹤';
+    a.textContent = (t.followDays ? `追蹤 ${t.followDays} 天` : '今天開始追蹤')
+      + (t.remindIn ? `，${t.remindIn} 天後提醒` + (t.pendingRemind ? ' 已排定' : '') : '');
     meta.append(a, document.createTextNode('  '));
   }
   appendSource(meta, t);
@@ -789,6 +863,18 @@ function followRow(t){
     acts.append(Object.assign(el('span','pend'),{textContent:'已排定封存'}),
                 button('取消', ()=>post('/api/check',{id:t.id,checked:false}), st));
   }else if(t.tickable){
+    // Only a red row can be postponed, so the input is not noise on the rest.
+    if(t.followAlert){
+      const n = el('input','days');
+      Object.assign(n, {type:'number', min:1, max:MAX_REMIND, value:FOLLOW_DAYS,
+                        title:'幾天後再提醒'});
+      acts.append(n, button('天後提醒', ()=>{
+        const days = Number(n.value);
+        if(!Number.isInteger(days) || days < 1 || days > MAX_REMIND)
+          return Promise.reject(new Error('bad days'));
+        return post('/api/remind',{id:t.id,days});
+      }, st));
+    }
     acts.append(button('回到待辦', ()=>post('/api/follow',{id:t.id,follow:false}), st),
                 button('封存', ()=>post('/api/check',{id:t.id,checked:true}), st));
   }
@@ -835,7 +921,8 @@ function row(t){
   return r;
 }
 load();
-setInterval(load, 30000);
+// A reload rebuilds every row, which would wipe a day count mid-typing.
+setInterval(()=>{ if(!document.activeElement.classList.contains('days')) load(); }, 30000);
 setInterval(()=>fetch('/api/ping?cid='+CID,{method:'POST'}).catch(()=>{}), __PING_MS__);
 // pagehide, not beforeunload: beforeunload is for confirmation dialogs and
 // is unreliable on mobile, while pagehide is the unload-side event browsers

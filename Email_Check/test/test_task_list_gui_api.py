@@ -274,6 +274,44 @@ r = cli.post("/api/follow", json={"id": "nope", "follow": True})
 check("following a todo that is gone is refused",
       r.status_code == 409 and r.get_json()["gone"] is True, r.get_json())
 
+# --- 延後提醒 on a red row ---
+clear(tg.FOLLOW_PATH)
+write(tg.STATE_PATH, {"roundSeq": 22, "todos": [
+    {"id": "red", "subject": "red", "priority": "normal", "followSince": NOW - 5 * DAY},
+    {"id": "later", "subject": "postponed", "priority": "normal",
+     "followSince": NOW - 5 * DAY, "followRemindAt": NOW + int(1.5 * DAY)},
+    {"id": "due", "subject": "postponement ran out", "priority": "normal",
+     "followSince": NOW - 9 * DAY, "followRemindAt": NOW - 60},
+    {"id": "plain", "subject": "filed only", "priority": "normal"}]})
+rows = by_id(cli.get("/api/todos").get_json()["todos"])
+check("a future reminder keeps an old row out of red, and says when",
+      (rows["later"]["followAlert"], rows["later"]["remindIn"], rows["later"]["followDays"])
+      == (False, 2, 5), rows["later"])
+check("a reminder that came due turns it red again",
+      rows["due"]["followAlert"] is True and rows["due"]["remindIn"] == 0, rows["due"])
+for bad in (0, 61, 2.5, True, "3"):
+    r = cli.post("/api/remind", json={"id": "red", "days": bad})
+    check(f"days={bad!r} is a bad request", r.status_code == 400, r.status_code)
+r = cli.post("/api/remind", json={"id": "plain", "days": 3})
+check("a row not in 追蹤中 cannot be postponed", r.status_code == 409, r.get_json())
+before = int(time.time())
+r = cli.post("/api/remind", json={"id": "red", "days": 4})
+due_at = read(tg.FOLLOW_PATH)["follow"]["red"]
+check("the due moment is computed at the click",
+      before + 4 * DAY <= due_at <= int(time.time()) + 4 * DAY, due_at)
+rows = by_id(cli.get("/api/todos").get_json()["todos"])
+check("a queued postponement clears the red at once and is marked pending",
+      (rows["red"]["followAlert"], rows["red"]["remindIn"], rows["red"]["pendingRemind"],
+       rows["red"]["pendingFollow"], rows["red"]["following"])
+      == (False, 4, True, False, True), rows["red"])
+write(tg.STATE_PATH, {"roundSeq": 23, "todos": [
+    {"id": "red", "subject": "red", "priority": "normal", "followSince": NOW - 5 * DAY,
+     "followRemindAt": due_at}]})
+cli.get("/api/todos")
+check("a postponement drops once state.json carries it",
+      read(tg.FOLLOW_PATH)["follow"] == {}, read(tg.FOLLOW_PATH))
+clear(tg.FOLLOW_PATH)
+
 # The round applied f1 and w2, and w1 left the list.
 write(tg.STATE_PATH, {"roundSeq": 21, "todos": [
     {"id": "f1", "subject": "filed", "priority": "important", "followSince": NOW},
@@ -312,6 +350,9 @@ check("轉追蹤 and 回到待辦 both post to the follow endpoint",
 check("the red threshold is the server's constant, not a second copy",
       "__FOLLOW_DAYS__" not in page
       and f"const FOLLOW_DAYS = {tg.FOLLOW_ALERT_DAYS};" in page)
+check("and so is the postponement cap",
+      "__MAX_REMIND__" not in page and f"const MAX_REMIND = {tg.MAX_REMIND_DAYS};" in page)
+check("the postpone control posts to the remind endpoint", "'/api/remind'" in page)
 check("an alias mailbox is labelled rather than left looking unresolved",
       "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",

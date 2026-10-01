@@ -82,7 +82,8 @@ BACKLOG_NOTICE_EVERY = 3
 PRIORITIES = ("urgent", "important", "normal")
 # Todo fields only the user's GUI requests may set. A round's report carrying
 # either is ignored field by field.
-USER_OWNED = ("priority", "followSince")
+FOLLOW_FIELDS = ("followSince", "followRemindAt")
+USER_OWNED = ("priority",) + FOLLOW_FIELDS
 NOTIFIED_KEEP = 100
 # How long an archived todo stays recoverable. Three days to notice a mis-tick,
 # then it is gone for good.
@@ -351,11 +352,19 @@ def _read_triage() -> tuple[dict[str, str], str]:
     return {k: str(v) for k, v in levels.items()}, err
 
 
-def _read_follow() -> tuple[dict[str, bool], str]:
-    """True asks for 追蹤中, false for back to 待辦清單. Anything that is not a
-    JSON boolean is dropped, since bool("false") would read as a yes."""
+def _is_remind_at(value: Any) -> bool:
+    """A positive epoch integer. bool is excluded explicitly, since True is an
+    int in Python and would otherwise read as a reminder at second 1."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _read_follow() -> tuple[dict[str, bool | int], str]:
+    """True asks for 追蹤中, false for back to 待辦清單, and an epoch integer
+    for 追蹤中 with the reminder moved to that moment. Anything else is
+    dropped, since bool("false") would read as a yes."""
     wanted, err = _read_map_request(FOLLOW_PATH, "follow", "follow file unreadable")
-    return {k: v for k, v in wanted.items() if isinstance(v, bool)}, err
+    return {k: v for k, v in wanted.items()
+            if isinstance(v, bool) or _is_remind_at(v)}, err
 
 
 def _merge(prior: dict, latest: dict) -> dict:
@@ -666,7 +675,7 @@ class State:
         It stays because the invariant it protects is the expensive one, and
         because any future writer would otherwise silently lose it.
 
-        `priority` and `followSince` are stripped from every report, so the
+        Every USER_OWNED field is stripped from every report, so the
         user's triage and follow requests are their only source and an upsert
         keeps whatever the list already had.
         """
@@ -743,7 +752,8 @@ class State:
             elif want == "" and "priority" in todo:
                 del todo["priority"]
                 # Or filing it again later would drop it straight into 追蹤中.
-                todo.pop("followSince", None)
+                for owned in FOLLOW_FIELDS:
+                    todo.pop(owned, None)
                 changed += 1
         return changed, ""
 
@@ -755,6 +765,10 @@ class State:
         click, so a row's age counts from the round that applied it, up to one
         slot late. The level is never touched, which is what lets 回到待辦
         return a todo to the level it left with.
+
+        An integer request is a postponed reminder. The GUI computes the moment
+        at the click, so the delay the user typed is not stretched by the wait
+        for this round, and it lands in `followRemindAt`. 回到待辦 clears both.
 
         A todo with no level is refused, because the GUI files 追蹤中 only
         from 待辦清單, and a flagged todo with no level would drop out of
@@ -769,12 +783,20 @@ class State:
             key = _usable_id(todo)
             if key is None or key not in wanted:
                 continue
-            if wanted[key] and "followSince" not in todo \
-                    and todo.get("priority") in PRIORITIES:
-                todo["followSince"] = now
-                changed += 1
-            elif not wanted[key] and "followSince" in todo:
-                del todo["followSince"]
+            want = wanted[key]
+            if want is False:
+                if any(f in todo for f in FOLLOW_FIELDS):
+                    for owned in FOLLOW_FIELDS:
+                        todo.pop(owned, None)
+                    changed += 1
+                continue
+            if todo.get("priority") not in PRIORITIES:
+                continue
+            before = (todo.get("followSince"), todo.get("followRemindAt"))
+            todo.setdefault("followSince", now)
+            if want is not True:
+                todo["followRemindAt"] = want
+            if (todo.get("followSince"), todo.get("followRemindAt")) != before:
                 changed += 1
         return changed, ""
 
@@ -872,10 +894,10 @@ class State:
 
         live = {_usable_id(t) for t in self.todos}
         for item in back:
-            # followSince goes too, so a todo archived from 追蹤中 comes back
-            # to 待辦清單 rather than resuming an age that kept counting.
+            # The follow fields go too, so a todo archived from 追蹤中 comes
+            # back to 待辦清單 rather than resuming an age that kept counting.
             clean = {k: v for k, v in item.items()
-                     if k not in ("archivedAt", "followSince")}
+                     if k != "archivedAt" and k not in FOLLOW_FIELDS}
             try:
                 archived_at = int(item.get("archivedAt", 0))
             except (TypeError, ValueError):

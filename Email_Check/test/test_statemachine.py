@@ -1382,6 +1382,36 @@ check("an id-less todo is never touched", "followSince" not in st80.todos[-1], s
 st80.consume_follow(9999)
 check("following again does not restart the clock", by80["f"]["followSince"] == 1000,
       by80["f"])
+
+# A postponed reminder is an epoch in the same map.
+st84 = sm.State({"horizon": 100, "roundSeq": 84, "triageSince": 1,
+                 "todos": [{"id": "r", "priority": "normal", "followSince": 500},
+                           {"id": "s", "priority": "urgent"},
+                           {"id": "t", "priority": "normal", "followSince": 500,
+                            "followRemindAt": 9000},
+                           {"id": "u", "priority": "normal", "followSince": 500}]})
+json.dump({"follow": {"r": 5000, "s": 6000, "t": False, "u": True}},
+          open(sm.FOLLOW_PATH, "w", encoding="utf-8"))
+changed84, _ = st84.consume_follow(1000)
+by84 = {t["id"]: t for t in st84.todos}
+check("a postponement lands and keeps the original stamp",
+      (by84["r"]["followSince"], by84["r"]["followRemindAt"]) == (500, 5000), by84["r"])
+check("one for a filed todo not yet followed starts the follow too",
+      (by84["s"]["followSince"], by84["s"]["followRemindAt"]) == (1000, 6000), by84["s"])
+check("回到待辦 clears the reminder with the stamp",
+      "followSince" not in by84["t"] and "followRemindAt" not in by84["t"], by84["t"])
+check("true is never read as a reminder at second 1", "followRemindAt" not in by84["u"],
+      by84["u"])
+check("and the count covers only real changes", changed84 == 3, changed84)
+st84.reconcile_todos([{"id": "r", "followRemindAt": 1}], set())
+check("a report cannot move a reminder",
+      [t["followRemindAt"] for t in st84.todos if t["id"] == "r"] == [5000], st84.todos)
+json.dump({"levels": {"r": ""}}, open(sm.TRIAGE_PATH, "w", encoding="utf-8"))
+st84.consume_triage()
+check("重新分類 clears the reminder as well",
+      [("followRemindAt" in t) for t in st84.todos if t["id"] == "r"] == [False], st84.todos)
+_clear(sm.TRIAGE_PATH)
+
 open(sm.FOLLOW_PATH, "w").write("{ broken")
 check("an unreadable follow file reports instead of guessing",
       st80.consume_follow(1000) == (0, "follow file unreadable"))
@@ -1421,12 +1451,13 @@ check("commit reports the follow",
       (held[-1]["followedThisRound"], held[-1]["followBlocked"],
        held[-1]["shouldOpenTodoList"]) == (1, "", False), held[-1])
 _clear(sm.TRIAGE_PATH, sm.FOLLOW_PATH)
-_write_archive([dict(a82, archivedAt=2000)])
+_write_archive([dict(a82, archivedAt=2000, followRemindAt=5000)])
 json.dump({"restoreIds": ["q"]}, open(sm.RESTORE_PATH, "w", encoding="utf-8"))
 st83 = sm.State({"horizon": 100, "roundSeq": 83, "triageSince": 1})
 st83.consume_restores()
 check("a todo archived from 追蹤中 is restored to 待辦清單 at its level",
-      [(t.get("priority"), "followSince" in t) for t in st83.todos] == [("normal", False)],
+      [(t.get("priority"), "followSince" in t, "followRemindAt" in t) for t in st83.todos]
+      == [("normal", False, False)],
       st83.todos)
 _clear(sm.ARCHIVE_PATH, sm.RESTORE_PATH)
 
