@@ -34,8 +34,12 @@ tg.ARCHIVE_PATH = os.path.join(work, "tasks-archive.json")
 tg.RESTORE_PATH = os.path.join(work, "tasks-restore.json")
 tg.TRIAGE_PATH = os.path.join(work, "tasks-triage.json")
 tg.FOLLOW_PATH = os.path.join(work, "tasks-follow.json")
+tg.LINKS_PATH = os.path.join(work, "mail-links.json")
 tg.app.config["TESTING"] = True
 cli = tg.app.test_client()
+# Every /api/todos starts a link lookup, which would otherwise log in to the
+# real mailboxes. The link section below swaps in stubs of its own.
+tg._lookup_links = lambda ids: {}
 
 fails = []
 
@@ -330,6 +334,116 @@ check("a first run with no state file still serves", d["todos"] == [], d)
 check("and no request file was created just by reading",
       not os.path.exists(tg.TRIAGE_PATH) and not os.path.exists(tg.CHECKED_PATH))
 
+
+# --- a subject links to the original mail once the background lookup ends ---
+def settle():
+    """Wait out the lookup a request started, so the next request sees it."""
+    if tg._link_job is not None:
+        tg._link_job.join(5)
+
+
+def reset_links(lookup):
+    """Start over as a new process would, reloading the cache file on first use."""
+    settle()
+    tg._links = None
+    tg._given_up.clear()
+    tg._lookup_links = lookup
+
+
+LINK = "https://mail.google.com/mail/?authuser=me@gmail.example#all/1a0e"
+TODOS = [{"id": "g1", "subject": "gmail origin"},
+         {"id": "x1", "subject": "exchange origin"},
+         {"subject": "no id"}]
+tg.LINK_RETRY_DELAY = 0
+asked = []
+
+
+def answering(ids):
+    asked.append(list(ids))
+    return {"g1": LINK, "x1": None}
+
+
+clear(tg.LINKS_PATH)
+reset_links(answering)
+write(tg.STATE_PATH, {"todos": TODOS})
+d = cli.get("/api/todos").get_json()
+settle()
+check("the first poll serves at once, with no link yet and a lookup pending",
+      d["linksPending"] is True and all(r["link"] == "" for r in d["todos"]), d)
+check("the lookup is asked only for usable ids", asked == [["g1", "x1"]], asked)
+d = cli.get("/api/todos").get_json()
+rows = by_id(d["todos"])
+check("the next poll carries the link, and none where the lookup had none",
+      (rows["g1"]["link"], rows["x1"]["link"], d["linksPending"]) == (LINK, "", False), d)
+check("an id already answered, None included, is never looked up again",
+      len(asked) == 1, asked)
+check("both answers are saved, None included",
+      read(tg.LINKS_PATH) == {"links": {"g1": LINK, "x1": None}}, read(tg.LINKS_PATH))
+
+reset_links(answering)
+d = cli.get("/api/todos").get_json()
+check("a new process serves the saved link on its first poll, with no lookup at all",
+      by_id(d["todos"])["g1"]["link"] == LINK and d["linksPending"] is False
+      and len(asked) == 1, (asked, d))
+
+write(tg.STATE_PATH, {"todos": TODOS[:1]})
+cli.get("/api/todos")
+check("a todo that left the list is dropped from the saved cache",
+      read(tg.LINKS_PATH) == {"links": {"g1": LINK}}, read(tg.LINKS_PATH))
+
+asked.clear()
+write(tg.LINKS_PATH, {"links": {"g1": "javascript:alert(1)", "x1": None}})
+reset_links(answering)
+write(tg.STATE_PATH, {"todos": TODOS})
+d = cli.get("/api/todos").get_json()
+settle()
+check("a saved value that is not a Gmail link is never served, and is looked up again",
+      by_id(d["todos"])["g1"]["link"] == "" and asked == [["g1"]], (asked, d))
+
+calls = []
+
+
+def broken(ids):
+    calls.append(list(ids))
+    raise OSError("imap down")
+
+
+clear(tg.LINKS_PATH)
+reset_links(broken)
+cli.get("/api/todos")
+settle()
+d = cli.get("/api/todos").get_json()
+check("a failed lookup is retried once, then those todos stay plain with nothing pending",
+      calls == [["g1", "x1"], ["g1", "x1"]] and all(r["link"] == "" for r in d["todos"])
+      and d["linksPending"] is False, (calls, d))
+check("ids given up on are not saved, so the next launch tries them again",
+      read(tg.LINKS_PATH) is None, read(tg.LINKS_PATH))
+write(tg.STATE_PATH, {"todos": TODOS + [{"id": "n1", "subject": "arrived later"}]})
+cli.get("/api/todos")
+settle()
+check("a todo arriving later gets its own two tries, and the given-up ones get none",
+      calls[2:] == [["n1"], ["n1"]], calls)
+
+flaky_calls = []
+
+
+def flaky(ids):
+    flaky_calls.append(list(ids))
+    if len(flaky_calls) == 1:
+        raise OSError("blip")
+    return {"g1": LINK, "x1": None}
+
+
+reset_links(flaky)
+write(tg.STATE_PATH, {"todos": TODOS})
+cli.get("/api/todos")
+settle()
+d = cli.get("/api/todos").get_json()
+check("a lookup that fails once and then succeeds still links",
+      len(flaky_calls) == 2 and by_id(d["todos"])["g1"]["link"] == LINK, (flaky_calls, d))
+reset_links(lambda ids: {})
+clear(tg.STATE_PATH, tg.LINKS_PATH)
+
 # --- the page: 待分類 above 待辦清單, and only 待分類 offers the levels ---
 page = tg.index()
 check("both sections are in the page, 待分類 first",
@@ -357,6 +471,8 @@ check("an alias mailbox is labelled rather than left looking unresolved",
       "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",
       page.count("appendSource(") == 3, page.count("appendSource("))
+check("the quick re-poll interval is the server's constant",
+      "__LINK_POLL_MS__" not in page and f"setTimeout(refresh, {tg.LINK_POLL_MS})" in page)
 
 shutil.rmtree(work, ignore_errors=True)
 print()

@@ -10,9 +10,10 @@ immediately; the ping timeout is only a backstop for closes that send no
 beacon at all (crash, sleep, a discarded background tab).
 
 Writer discipline is the whole design. This process writes the four request
-files and nothing else, and only ever reads `state.json` and the archive.
-statemachine.py is the reverse. With one writer per file plus atomic replace, a
-reader always sees a complete old or complete new file and no lock is needed.
+files and its own link cache and nothing else, and only ever reads
+`state.json` and the archive. statemachine.py is the reverse. With one writer
+per file plus atomic replace, a reader always sees a complete old or complete
+new file and no lock is needed.
 
 Each request file is one verb the user can aim at a row. A tick says done, and
 待分類's and 追蹤中's 封存 are the same tick. A restore says un-archive that. A
@@ -28,6 +29,11 @@ killing the process cannot lose one. The page reports per-row save state
 because a stale tab against a stopped server otherwise looks identical to a
 successful save.
 
+A subject links to the original mail in the mailbox that first received it,
+so a reply goes out from that address. The link is looked up over IMAP by
+gmail_mcp in a background thread, never by the scheduled LLM, and kept in the
+link cache, so each todo is looked up once rather than on every launch.
+
 Run with
     conda run -n ML python "D:\\dont_move\\git_save\\Daily_Task\\Email_Check\\task_list\\task_list_gui.py"
 """
@@ -35,6 +41,7 @@ Run with
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import json
 import os
 import socket
@@ -47,7 +54,7 @@ from flask import Flask, jsonify, request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # state.json lives one level up because statemachine.py owns it and the rest of
-# the Email_Check task reads it too. Only the five files below are this
+# the Email_Check task reads it too. Only the six files below are this
 # folder's, which is also where _atomic_write puts its temp file.
 STATE_PATH = os.path.join(os.path.dirname(HERE), "state.json")
 CHECKED_PATH = os.path.join(HERE, "tasks-checked.json")
@@ -55,6 +62,10 @@ ARCHIVE_PATH = os.path.join(HERE, "tasks-archive.json")
 RESTORE_PATH = os.path.join(HERE, "tasks-restore.json")
 TRIAGE_PATH = os.path.join(HERE, "tasks-triage.json")
 FOLLOW_PATH = os.path.join(HERE, "tasks-follow.json")
+# Todo id to link, or null where a lookup found that no link can be built.
+# Only this process reads it. Its links carry the origin mailbox's address,
+# which is one more reason the folder's *.json stays out of git.
+LINKS_PATH = os.path.join(HERE, "mail-links.json")
 # Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
 # order of 待辦清單. A todo with none of these is 待分類.
 PRIORITIES = ("urgent", "important", "normal")
@@ -77,12 +88,35 @@ WATCHDOG_TICK = 3
 # Months a bare MM-DD may lag the current month before it is treated as next
 # year rather than as recently overdue.
 BARE_LOOKBACK = 3
+# gmail_mcp is a sibling folder outside this repo. It is loaded on the first
+# lookup, so the page and its tests run without it.
+GMAIL_MCP = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))),
+                         "gmail_mcp", "server.py")
+# A failed lookup (IMAP unreachable, a revoked app password) is retried once
+# after this many seconds. If the retry fails too, the todos it covered get no
+# link from this process, because the user would rather find the mail by hand
+# than wait.
+LINK_RETRY_DELAY = 5
+# Every link origin_links builds starts with this. A cached value that does not
+# is dropped, since the page renders it as an href.
+GMAIL_WEB = "https://mail.google.com/"
+# How soon the page polls again while a lookup runs. One lookup over 7 todos
+# took 10.5 s, mostly two IMAP logins and about 0.5 s per message.
+LINK_POLL_MS = 3000
 
 app = Flask(__name__)
 _lock = threading.Lock()
 _started = time.time()
 _clients: dict[str, float] = {}
 _seen_any = False
+# The link cache in memory, None until the first poll loads LINKS_PATH.
+_links: dict[str, str | None] | None = None
+# Ids whose lookup failed twice. Never saved, so the next launch tries again.
+_given_up: set[str] = set()
+# Taken after _lock whenever both are held, never before it.
+_link_lock = threading.Lock()
+_link_job: threading.Thread | None = None
+_gmail = None
 
 
 def live_clients(now: float, clients: dict[str, float]) -> dict[str, float]:
@@ -289,7 +323,8 @@ def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
 def index() -> str:
     return (PAGE.replace("__PING_MS__", str(PING_EVERY_MS))
                 .replace("__FOLLOW_DAYS__", str(FOLLOW_ALERT_DAYS))
-                .replace("__MAX_REMIND__", str(MAX_REMIND_DAYS)))
+                .replace("__MAX_REMIND__", str(MAX_REMIND_DAYS))
+                .replace("__LINK_POLL_MS__", str(LINK_POLL_MS)))
 
 
 def load_restores() -> set[str]:
@@ -468,6 +503,87 @@ def _follow_days(stamp, now: float) -> int:
         return 0
 
 
+def _lookup_links(ids: list[str]) -> dict[str, str | None]:
+    """gmail_mcp's origin_links, loaded on first use. Tests replace this."""
+    global _gmail
+    if _gmail is None:
+        spec = importlib.util.spec_from_file_location("gmail_mcp_server", GMAIL_MCP)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _gmail = module
+    return _gmail.origin_links(ids)
+
+
+def _load_links() -> dict[str, str | None]:
+    data = _read_json(LINKS_PATH, {})
+    stored = data.get("links") if isinstance(data, dict) else None
+    if not isinstance(stored, dict):
+        return {}
+    return {str(k): v for k, v in stored.items()
+            if v is None or (isinstance(v, str) and v.startswith(GMAIL_WEB))}
+
+
+def _save_links() -> None:
+    """Holds _lock so the watchdog cannot exit mid-write, and takes the
+    snapshot inside it so two saves cannot land out of order. A failed write
+    only costs a lookup next launch."""
+    with _lock:
+        with _link_lock:
+            snapshot = dict(_links)
+        try:
+            _atomic_write(LINKS_PATH, {"links": snapshot})
+        except OSError as exc:
+            print("mail links not saved: " + type(exc).__name__)
+
+
+def _resolve_links(ids: list[str]) -> None:
+    found = None
+    for delay in (0, LINK_RETRY_DELAY):
+        time.sleep(delay)
+        try:
+            found = _lookup_links(ids)
+            break
+        except Exception as exc:
+            # Type only, since an IMAP error can quote the login it failed on.
+            print("mail links unavailable: " + type(exc).__name__)
+    with _link_lock:
+        if found is None:
+            _given_up.update(ids)
+            return
+        # Every id asked about gets an entry, None included, so an id the
+        # lookup skipped is not looked up again.
+        _links.update({i: found.get(i) for i in ids})
+    _save_links()
+
+
+def links_for(ids: list[str]) -> tuple[dict[str, str], bool]:
+    """The links known for these ids, and whether a lookup is still running.
+
+    Ids never looked up start one in the background, because a lookup takes
+    seconds and the list must not wait on it. Entries for todos that left the
+    list are dropped, which keeps the cache from growing forever.
+    """
+    global _link_job, _links
+    live = set(ids)
+    with _link_lock:
+        if _links is None:
+            _links = _load_links()
+        stale = [i for i in _links if i not in live]
+        for i in stale:
+            del _links[i]
+        missing = [i for i in ids if i not in _links and i not in _given_up]
+        running = _link_job is not None and _link_job.is_alive()
+        if missing and not running:
+            _link_job = threading.Thread(target=_resolve_links, args=(missing,), daemon=True)
+            _link_job.start()
+            running = True
+        known = {i: _links[i] for i in ids if _links.get(i)}
+    # After releasing _link_lock, because _save_links takes _lock first.
+    if stale:
+        _save_links()
+    return known, running
+
+
 @app.get("/api/todos")
 def api_todos():
     _touch(request.args.get("cid", ""))
@@ -475,6 +591,7 @@ def api_todos():
         state = _read_json(STATE_PATH, {})
         todos = [t for t in state.get("todos", []) if isinstance(t, dict)]
         checked, levels, follows = prune_requests(todos)
+    links, linking = links_for([tid for tid in map(_usable_id, todos) if tid])
     now = time.time()
     rows = []
     for t in todos:
@@ -505,6 +622,7 @@ def api_todos():
             # would raise TypeError against a string one. statemachine refuses
             # such a todo at ingestion; this covers a hand-edited state.json.
             "subject": str(t.get("subject") or "(no subject)"),
+            "link": links.get(tid or "", ""),
             "sender": t.get("from") or "",
             "mailbox": t.get("mailbox") or "",
             "received": t.get("received") or "",
@@ -531,7 +649,8 @@ def api_todos():
                              r["subject"]))
     archived = len(_read_json(ARCHIVE_PATH, {}).get("archived", []))
     return jsonify({"todos": rows, "archivedTotal": archived,
-                    "roundSeq": int(state.get("roundSeq", 0))})
+                    "roundSeq": int(state.get("roundSeq", 0)),
+                    "linksPending": linking})
 
 
 @app.post("/api/ping")
@@ -586,6 +705,8 @@ PAGE = """<!doctype html>
  input[type=checkbox]{width:19px;height:19px;margin:2px 0 0;cursor:pointer;flex:none}
  .body{flex:1;min-width:0}
  .subj{font-weight:600;margin-bottom:3px;overflow-wrap:anywhere}
+ .subj a{color:inherit;text-decoration:none;border-bottom:1px dotted #6a7480}
+ .subj a:hover{color:#9cc3ff;border-bottom-color:#9cc3ff}
  .act{color:#c9cdd3;font-size:14px;overflow-wrap:anywhere}
  .meta{color:#8b9096;font-size:12px;margin-top:5px}
  .due{color:#ffb26b;font-weight:600}
@@ -689,6 +810,14 @@ async function load(){
   fill('listold', 'cntold', filed, '目前沒有待辦', row);
   fill('listfollow', 'cntfollow', tracked, '沒有追蹤中的項目', followRow);
   loadArchive();
+  // Links arrive from a background lookup after the list is served, so check
+  // back soon rather than at the 30 s refresh.
+  if(d.linksPending) setTimeout(refresh, __LINK_POLL_MS__);
+}
+
+// A reload rebuilds every row, which would wipe a day count mid-typing.
+function refresh(){
+  if(!document.activeElement.classList.contains('days')) load();
 }
 
 const LEVELS = [['urgent','緊急'], ['important','重要'], ['normal','普通']];
@@ -805,7 +934,11 @@ function fill(listId, cntId, items, emptyText, make){
 
 function cardBody(t){
   const body = el('div','body');
-  body.append(Object.assign(el('div','subj'),{textContent:t.subject}));
+  const subj = el('div','subj');
+  if(t.link) subj.append(Object.assign(el('a'), {href:t.link, target:'_blank',
+      rel:'noopener', textContent:t.subject, title:'在原收件信箱開信，可以直接回信'}));
+  else subj.textContent = t.subject;
+  body.append(subj);
   if(t.action) body.append(Object.assign(el('div','act'),{textContent:t.action}));
   const meta = el('div','meta');
   if(t.priority){
@@ -921,8 +1054,7 @@ function row(t){
   return r;
 }
 load();
-// A reload rebuilds every row, which would wipe a day count mid-typing.
-setInterval(()=>{ if(!document.activeElement.classList.contains('days')) load(); }, 30000);
+setInterval(refresh, 30000);
 setInterval(()=>fetch('/api/ping?cid='+CID,{method:'POST'}).catch(()=>{}), __PING_MS__);
 // pagehide, not beforeunload: beforeunload is for confirmation dialogs and
 // is unreliable on mobile, while pagehide is the unload-side event browsers

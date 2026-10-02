@@ -22,6 +22,12 @@ conda run -n ML --no-capture-output python "D:\dont_move\git_save\Daily_Task\Ema
 改那邊的判斷規則要跑 `gmail_mcp/test_origin_mailbox.py`，它蓋住了兩個實際誤判過的
 標頭形狀，包含群發信整份走 Bcc、連 `To` 都沒有的那一種。
 
+## 待辦清單主旨上的開信連結
+
+主旨連結打開的是原收件信箱裡的那封信，不是轉信中心的副本，這樣回信才會從原本的地址寄出。連結同樣不是這個 repo 算出來的。`task_list_gui.py` 在背景呼叫 `gmail_mcp/server.py` 的 `origin_links` 透過 IMAP 查出來，不經過排程的 LLM。查到的結果連同「這封沒有連結」都存進 `Email_Check/task_list/mail-links.json`，每封待辦只查一次，那個檔只有網頁自己讀寫。查詢失敗 5 秒後重試一次，再失敗就放棄，那幾封這次就沒有連結，也不會存檔，下次開網頁再查。只有 `gmail_mcp/.env` 有帳密的 Gmail 信箱拿得到連結，學校的 Exchange 信箱目前沒有。
+
+改那邊的連結規則要跑 `gmail_mcp/test_origin_links.py`。換連結格式或改了判斷規則之後，要刪掉 `mail-links.json`，否則已經存下來的舊連結與「沒有連結」會一直沿用到那封待辦離開清單為止。
+
 ## 不要為了省 token 去動 INSTRUCTIONS.md
 
 2026-09-20 量過並否決。四個 Gmail 任務在 Claude Code `/usage` 的 24 小時用量歸因裡排不上一行，
