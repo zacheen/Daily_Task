@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
 
 # Email_Check/, one level up from test/. The viewer sits under task_list/.
 CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -377,8 +378,9 @@ check("the next poll carries the link, and none where the lookup had none",
       (rows["g1"]["link"], rows["x1"]["link"], d["linksPending"]) == (LINK, "", False), d)
 check("an id already answered, None included, is never looked up again",
       len(asked) == 1, asked)
-check("both answers are saved, None included",
-      read(tg.LINKS_PATH) == {"links": {"g1": LINK, "x1": None}}, read(tg.LINKS_PATH))
+check("both answers are saved, None included, under the current version",
+      read(tg.LINKS_PATH) == {"version": tg.LINKS_VERSION, "links": {"g1": LINK, "x1": None}},
+      read(tg.LINKS_PATH))
 
 reset_links(answering)
 d = cli.get("/api/todos").get_json()
@@ -389,10 +391,20 @@ check("a new process serves the saved link on its first poll, with no lookup at 
 write(tg.STATE_PATH, {"todos": TODOS[:1]})
 cli.get("/api/todos")
 check("a todo that left the list is dropped from the saved cache",
-      read(tg.LINKS_PATH) == {"links": {"g1": LINK}}, read(tg.LINKS_PATH))
+      read(tg.LINKS_PATH)["links"] == {"g1": LINK}, read(tg.LINKS_PATH))
 
 asked.clear()
-write(tg.LINKS_PATH, {"links": {"g1": "javascript:alert(1)", "x1": None}})
+write(tg.LINKS_PATH, {"links": {"g1": LINK, "x1": None}})
+reset_links(answering)
+write(tg.STATE_PATH, {"todos": TODOS})
+cli.get("/api/todos")
+settle()
+check("a file from another version is ignored, so every todo is looked up again",
+      asked == [["g1", "x1"]], asked)
+
+asked.clear()
+write(tg.LINKS_PATH, {"version": tg.LINKS_VERSION,
+                      "links": {"g1": "javascript:alert(1)", "x1": None}})
 reset_links(answering)
 write(tg.STATE_PATH, {"todos": TODOS})
 d = cli.get("/api/todos").get_json()
@@ -441,6 +453,20 @@ settle()
 d = cli.get("/api/todos").get_json()
 check("a lookup that fails once and then succeeds still links",
       len(flaky_calls) == 2 and by_id(d["todos"])["g1"]["link"] == LINK, (flaky_calls, d))
+
+QUERY = 'Subject:"Co-op: Access Granted!" AND From:a@b.example AND received:9/14/2026'
+SEARCH = tg.OUTLOOK_SEARCH + urllib.parse.quote(QUERY, safe="")
+clear(tg.LINKS_PATH)
+reset_links(lambda ids: {"g1": LINK, "x1": SEARCH})
+cli.get("/api/todos")
+settle()
+rows = by_id(cli.get("/api/todos").get_json()["todos"])
+check("an Outlook search row opens the bare mailbox and carries the query to copy",
+      (rows["x1"]["link"], rows["x1"]["outlookQuery"]) == (tg.OUTLOOK_WEB, QUERY), rows["x1"])
+check("a Gmail row carries no query", rows["g1"]["outlookQuery"] == "", rows["g1"])
+reset_links(lambda ids: {})
+check("an Outlook search survives a reload from the cache file",
+      by_id(cli.get("/api/todos").get_json()["todos"])["x1"]["outlookQuery"] == QUERY)
 reset_links(lambda ids: {})
 clear(tg.STATE_PATH, tg.LINKS_PATH)
 
@@ -471,6 +497,8 @@ check("an alias mailbox is labelled rather than left looking unresolved",
       "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",
       page.count("appendSource(") == 3, page.count("appendSource("))
+check("an Outlook row copies its query synchronously in the click itself",
+      "copyNow(t.outlookQuery)" in page and "document.execCommand('copy')" in page)
 check("the quick re-poll interval is the server's constant",
       "__LINK_POLL_MS__" not in page and f"setTimeout(refresh, {tg.LINK_POLL_MS})" in page)
 

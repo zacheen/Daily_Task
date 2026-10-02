@@ -24,9 +24,9 @@ conda run -n ML --no-capture-output python "D:\dont_move\git_save\Daily_Task\Ema
 
 ## 待辦清單主旨上的開信連結
 
-主旨連結打開的是原收件信箱裡的那封信，不是轉信中心的副本，這樣回信才會從原本的地址寄出。連結同樣不是這個 repo 算出來的。`task_list_gui.py` 在背景呼叫 `gmail_mcp/server.py` 的 `origin_links` 透過 IMAP 查出來，不經過排程的 LLM。查到的結果連同「這封沒有連結」都存進 `Email_Check/task_list/mail-links.json`，每封待辦只查一次，那個檔只有網頁自己讀寫。查詢失敗 5 秒後重試一次，再失敗就放棄，那幾封這次就沒有連結，也不會存檔，下次開網頁再查。只有 `gmail_mcp/.env` 有帳密的 Gmail 信箱拿得到連結，學校的 Exchange 信箱目前沒有。
+主旨連結打開的是原收件信箱裡的那封信，不是轉信中心的副本，這樣回信才會從原本的地址寄出。連結同樣不是這個 repo 算出來的。`task_list_gui.py` 在背景呼叫 `gmail_mcp/server.py` 的 `origin_links` 透過 IMAP 查出來，不經過排程的 LLM。查到的結果連同「這封沒有連結」都存進 `Email_Check/task_list/mail-links.json`，每封待辦只查一次，那個檔只有網頁自己讀寫。查詢失敗 5 秒後重試一次，再失敗就放棄，那幾封這次就沒有連結，也不會存檔，下次開網頁再查。只有 `gmail_mcp/.env` 有帳密的 Gmail 信箱拿得到直接開信的連結。學校的 Exchange 信箱拿到的是半自動搜尋，點主旨會把 `Subject:"主旨" AND From:寄件者 AND received:月/日/年` 複製到剪貼簿並開啟 Outlook 網頁版，在搜尋框貼上按 Enter 就只列出那一封。日期是必要的，同一個寄件者重複用同一個主旨時，少了它會列出好幾封。2026-10-02 試過另外兩條路，都走不通，不要再試。第一條是用網址帶搜尋條件，`outlook.office.com/mail/deeplink/search?query=`、`/mail/search?query=`、`/mail/?q=`、`/mail/inbox?q=`、`outlook.office365.com/owa/?path=/mail/search&query=` 共六種寫法，條件用主旨或 `Subject:"…" AND From:…` 都一樣，在已登入學校帳號的瀏覽器裡都列不出那封信。第二條是用 Microsoft Graph 以 `internetMessageId` 查出信的 `webLink`，連微軟自家的 Microsoft Graph Command Line Tools 走裝置碼登入，學校都要求管理員核准（Approval required）。
 
-改那邊的連結規則要跑 `gmail_mcp/test_origin_links.py`。換連結格式或改了判斷規則之後，要刪掉 `mail-links.json`，否則已經存下來的舊連結與「沒有連結」會一直沿用到那封待辦離開清單為止。
+改那邊的連結規則要跑 `gmail_mcp/test_origin_links.py`。換連結格式或改了判斷規則之後，要把 `task_list_gui.py` 的 `LINKS_VERSION` 加一，網頁看到版本不同就會丟掉整個快取重查一次，否則已經存下來的舊連結與「沒有連結」會一直沿用到那封待辦離開清單為止。
 
 ## 不要為了省 token 去動 INSTRUCTIONS.md
 

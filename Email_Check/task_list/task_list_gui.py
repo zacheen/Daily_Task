@@ -49,6 +49,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+from urllib.parse import unquote
 
 from flask import Flask, jsonify, request
 
@@ -66,6 +67,10 @@ FOLLOW_PATH = os.path.join(HERE, "tasks-follow.json")
 # Only this process reads it. Its links carry the origin mailbox's address,
 # which is one more reason the folder's *.json stays out of git.
 LINKS_PATH = os.path.join(HERE, "mail-links.json")
+# Bump when origin_links would answer differently for an id it already
+# answered (a new URL form or new None rules). A file of another version is
+# ignored, including one an older open copy of this page rewrites.
+LINKS_VERSION = 2
 # Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
 # order of 待辦清單. A todo with none of these is 待分類.
 PRIORITIES = ("urgent", "important", "normal")
@@ -97,9 +102,14 @@ GMAIL_MCP = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 # link from this process, because the user would rather find the mail by hand
 # than wait.
 LINK_RETRY_DELAY = 5
-# Every link origin_links builds starts with this. A cached value that does not
-# is dropped, since the page renders it as an href.
+# Every link origin_links builds starts with one of these. A cached value that
+# does not is dropped, since the page renders it as an href.
 GMAIL_WEB = "https://mail.google.com/"
+# Mirrors OUTLOOK_SEARCH in gmail_mcp/server.py. Outlook on the web reads no
+# search from its URL, so the row copies the AQS query after this prefix and
+# opens the bare mailbox for pasting.
+OUTLOOK_SEARCH = "https://outlook.office.com/mail/#q="
+OUTLOOK_WEB = "https://outlook.office.com/mail/"
 # How soon the page polls again while a lookup runs. One lookup over 7 todos
 # took 10.5 s, mostly two IMAP logins and about 0.5 s per message.
 LINK_POLL_MS = 3000
@@ -516,11 +526,14 @@ def _lookup_links(ids: list[str]) -> dict[str, str | None]:
 
 def _load_links() -> dict[str, str | None]:
     data = _read_json(LINKS_PATH, {})
-    stored = data.get("links") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or data.get("version") != LINKS_VERSION:
+        return {}
+    stored = data.get("links")
     if not isinstance(stored, dict):
         return {}
     return {str(k): v for k, v in stored.items()
-            if v is None or (isinstance(v, str) and v.startswith(GMAIL_WEB))}
+            if v is None or (isinstance(v, str)
+                             and v.startswith((GMAIL_WEB, OUTLOOK_SEARCH)))}
 
 
 def _save_links() -> None:
@@ -531,7 +544,7 @@ def _save_links() -> None:
         with _link_lock:
             snapshot = dict(_links)
         try:
-            _atomic_write(LINKS_PATH, {"links": snapshot})
+            _atomic_write(LINKS_PATH, {"version": LINKS_VERSION, "links": snapshot})
         except OSError as exc:
             print("mail links not saved: " + type(exc).__name__)
 
@@ -584,6 +597,14 @@ def links_for(ids: list[str]) -> tuple[dict[str, str], bool]:
     return known, running
 
 
+def _link_fields(link: str) -> dict[str, str]:
+    """The row's link, with an Outlook search split into the mailbox to open
+    and the query to copy."""
+    if link.startswith(OUTLOOK_SEARCH):
+        return {"link": OUTLOOK_WEB, "outlookQuery": unquote(link[len(OUTLOOK_SEARCH):])}
+    return {"link": link, "outlookQuery": ""}
+
+
 @app.get("/api/todos")
 def api_todos():
     _touch(request.args.get("cid", ""))
@@ -622,7 +643,7 @@ def api_todos():
             # would raise TypeError against a string one. statemachine refuses
             # such a todo at ingestion; this covers a hand-edited state.json.
             "subject": str(t.get("subject") or "(no subject)"),
-            "link": links.get(tid or "", ""),
+            **_link_fields(links.get(tid or "", "")),
             "sender": t.get("from") or "",
             "mailbox": t.get("mailbox") or "",
             "received": t.get("received") or "",
@@ -932,12 +953,38 @@ function fill(listId, cntId, items, emptyText, make){
   for(const t of items) list.append(make(t));
 }
 
+// Synchronous on purpose: navigator.clipboard.writeText settles after the click
+// opened the new tab, and Chrome refuses a write from an unfocused page.
+function copyNow(text){
+  const ta = Object.assign(el('textarea'), {value:text});
+  ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try{ ok = document.execCommand('copy'); }catch(e){}
+  ta.remove();
+  return ok;
+}
+
 function cardBody(t){
   const body = el('div','body');
   const subj = el('div','subj');
-  if(t.link) subj.append(Object.assign(el('a'), {href:t.link, target:'_blank',
-      rel:'noopener', textContent:t.subject, title:'在原收件信箱開信，可以直接回信'}));
-  else subj.textContent = t.subject;
+  if(t.link){
+    const a = Object.assign(el('a'), {href:t.link, target:'_blank', rel:'noopener',
+        textContent:t.subject, title:'在原收件信箱開信，可以直接回信'});
+    subj.append(a);
+    if(t.outlookQuery){
+      a.title = '複製搜尋條件並開啟 Outlook，在搜尋框按 Ctrl+V 再按 Enter';
+      const tip = el('span','pend');
+      // The default action still opens the mailbox in the new tab.
+      a.onclick = ()=>{
+        tip.textContent = copyNow(t.outlookQuery)
+          ? '  已複製搜尋條件，到 Outlook 搜尋框貼上後按 Enter'
+          : '  複製失敗，請手動搜尋 ' + t.outlookQuery;
+      };
+      subj.append(tip);
+    }
+  }else subj.textContent = t.subject;
   body.append(subj);
   if(t.action) body.append(Object.assign(el('div','act'),{textContent:t.action}));
   const meta = el('div','meta');
