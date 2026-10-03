@@ -142,8 +142,7 @@ Qualification 任務每天寫 `Personal_Task/Qualification/reports/` 與 `Person
 
 **上面那張表不是專案檔的全部。** 同一份 `.claude/settings.local.json` 服務這個
 工作目錄底下的每一個排程任務，而 `Personal_Task/` 裡的任務另有自己的網域與路徑規則，
-那些規則不能寫進這份文件，因為這個 repo 是公開的。各自的規格寫在該任務自己的
-SKILL.md 裡，位置在使用者家目錄的 `.claude/scheduled-tasks/` 底下。
+那些規則不能寫進這份文件，因為這個 repo 是公開的。各自的規格寫在 `Personal_Task/` 底下該任務自己的 README.md 裡。
 重建專案檔時要兩邊都看過，只照這張表重建會漏掉一半，
 而漏掉的那一半是在排程時無聲失敗，不是在互動時報錯。
 

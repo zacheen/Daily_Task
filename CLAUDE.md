@@ -1,41 +1,37 @@
 # Daily_Task
 
-## 改完程式要跑的測試
+## Tests to run after changing code
 
-`Email_Check/test/` 底下五個檔，直接跑檔案本身，不需要 pytest，全部跑完約 36 秒。
-改了 `statemachine.py`、`task_list/task_list_gui.py` 或 `calendar_check.py` 就跑對應的那一個。
+The five files under `Email_Check/test/` run directly as files, with no pytest, and take about 36 seconds in total. After changing `statemachine.py`, `task_list/task_list_gui.py` or `calendar_check.py`, run the matching one.
 
 ```
 conda run -n ML --no-capture-output python "D:\dont_move\git_save\Daily_Task\Email_Check\test\test_statemachine.py"
 ```
 
-`--no-capture-output` 不能省。測試會印中文，conda 把子行程的輸出接回來重印時走 cp950，
-會丟 UnicodeEncodeError，看起來像測試爆掉，其實測試本身是通過的。
+`--no-capture-output` is required. The tests print Chinese, and when conda reprints the child process's output it goes through cp950 and raises UnicodeEncodeError. That looks like a test failure even though the tests themselves passed.
 
-## 待辦清單上的「收件」與「收信」兩欄
+After changing `shared/deploy_skills.py`, run `shared/test_deploy_skills.py` the same way. It works only inside a temporary directory and never touches the real scheduled tasks.
 
-值不是這個 repo 算出來的。`收件` 是這封信在被轉進來之前原本寄到哪個信箱，
-`收信` 是那個信箱收到它的時間，兩個都由 Gmail MCP 算好之後，由排程的 LLM 照抄進
-`round.json`。推導規則在 `D:\dont_move\git_save\gmail_mcp\server.py` 的
-`_origin_mailbox` 與 `_received`，那個目錄不在版控裡，改壞了沒有歷史可以回。
+## Do not edit a scheduled task's SKILL.md directly
 
-改那邊的判斷規則要跑 `gmail_mcp/test_origin_mailbox.py`，它蓋住了兩個實際誤判過的
-標頭形狀，包含群發信整份走 Bcc、連 `To` 都沒有的那一種。
+Edit the source under `Scheduled_Tasks/` in the repo and deploy it with `shared/deploy_skills.py`, as the README section "How scheduled tasks are wired" describes. An edit made directly to the deployed copy has no version control, and the next deploy treats it as an outside edit and refuses to overwrite it.
 
-## 待辦清單主旨上的開信連結
+## The 收件 and 收信 columns in the task list
 
-主旨連結打開的是原收件信箱裡的那封信，不是轉信中心的副本，這樣回信才會從原本的地址寄出。連結同樣不是這個 repo 算出來的。`task_list_gui.py` 在背景呼叫 `gmail_mcp/server.py` 的 `origin_links` 透過 IMAP 查出來，不經過排程的 LLM。查到的結果連同「這封沒有連結」都存進 `Email_Check/task_list/mail-links.json`，每封待辦只查一次，那個檔只有網頁自己讀寫。查詢失敗 5 秒後重試一次，再失敗就放棄，那幾封這次就沒有連結，也不會存檔，下次開網頁再查。只有 `gmail_mcp/.env` 有帳密的 Gmail 信箱拿得到直接開信的連結。學校的 Exchange 信箱拿到的是半自動搜尋，點主旨會把 `Subject:"主旨" AND From:寄件者 AND received:月/日/年` 複製到剪貼簿並開啟 Outlook 網頁版，在搜尋框貼上按 Enter 就只列出那一封。日期是必要的，同一個寄件者重複用同一個主旨時，少了它會列出好幾封。2026-10-02 試過另外兩條路，都走不通，不要再試。第一條是用網址帶搜尋條件，`outlook.office.com/mail/deeplink/search?query=`、`/mail/search?query=`、`/mail/?q=`、`/mail/inbox?q=`、`outlook.office365.com/owa/?path=/mail/search&query=` 共六種寫法，條件用主旨或 `Subject:"…" AND From:…` 都一樣，在已登入學校帳號的瀏覽器裡都列不出那封信。第二條是用 Microsoft Graph 以 `internetMessageId` 查出信的 `webLink`，連微軟自家的 Microsoft Graph Command Line Tools 走裝置碼登入，學校都要求管理員核准（Approval required）。
+Their values are not computed in this repo. `收件` is the mailbox a message was originally sent to before it was forwarded here, and `收信` is when that mailbox received it. The Gmail MCP computes both, and the scheduled LLM copies them into `round.json` unchanged. The derivation rules are `_origin_mailbox` and `_received` in `D:\dont_move\git_save\gmail_mcp\server.py`. That directory has no version control, so a bad change there has no history to recover from.
 
-改那邊的連結規則要跑 `gmail_mcp/test_origin_links.py`。換連結格式或改了判斷規則之後，要把 `task_list_gui.py` 的 `LINKS_VERSION` 加一，網頁看到版本不同就會丟掉整個快取重查一次，否則已經存下來的舊連結與「沒有連結」會一直沿用到那封待辦離開清單為止。
+Changing those rules means running `gmail_mcp/test_origin_mailbox.py`. It covers two header shapes that were actually misjudged, including a bulk mail sent entirely through Bcc with no `To` at all.
 
-## 不要為了省 token 去動 INSTRUCTIONS.md
+## The open-mail link on a task list subject
 
-2026-09-20 量過並否決。四個 Gmail 任務在 Claude Code `/usage` 的 24 小時用量歸因裡排不上一行，
-而三個看似只是給人看的段落逐段查證後都帶著執行時規則，**很少用到不等於執行時用不到**。
-壓縮流程與減少讀取信件內文也一併否決，前者動到使用者確認過的判例，
-後者違反「漏掉一封該辦的信比多發一則通知糟得多」，而且這個任務失敗時是無聲的。
+The subject link opens the message in the mailbox that originally received it, not the copy in the forwarding hub, so that a reply goes out from the original address. The link is not computed in this repo either. `task_list_gui.py` calls `origin_links` in `gmail_mcp/server.py` in the background, which looks it up over IMAP without involving the scheduled LLM. Each result, including "this message has no link", is saved to `Email_Check/task_list/mail-links.json`, each todo is looked up only once, and only the web page reads or writes that file. A failed lookup is retried once after 5 seconds and then given up, so those messages get no link this time, nothing is saved, and the next page load tries again. Only the Gmail mailboxes whose credentials are in `gmail_mcp/.env` get a link that opens the message directly. The school's Exchange mailbox gets a semi-automatic search instead. Clicking the subject copies `Subject:"<subject>" AND From:<sender> AND received:<M/D/YYYY>` to the clipboard and opens Outlook on the web, and pasting it into the search box and pressing Enter lists only that message. The date is required, because when one sender reuses the same subject, the search without it lists several messages. Two other routes were tried on 2026-10-02 and neither works, so do not try them again. The first passes the search in the URL. Six URL forms were tried, among them `outlook.office.com/mail/deeplink/search?query=`, `/mail/search?query=`, `/mail/?q=`, `/mail/inbox?q=` and `outlook.office365.com/owa/?path=/mail/search&query=`, with either the subject or `Subject:"…" AND From:…` as the condition, and none of them listed the message in a browser signed in to the school account. The second looks up the message's `webLink` through Microsoft Graph by its `internetMessageId`, and even Microsoft's own Microsoft Graph Command Line Tools, signing in with a device code, need administrator approval from the school (Approval required).
 
-要重開這件事，先拿出新的歸因資料顯示排程執行確實佔了可觀比例，或是一次可以追溯到
-指令檔組織方式的執行失敗。兩者都沒有就不要再量一次。
+Changing those link rules means running `gmail_mcp/test_origin_links.py`. After changing the link format or the rules, increase `LINKS_VERSION` in `task_list_gui.py` by one. When the page sees a different version it drops the whole cache and looks everything up again. Otherwise the old links and the saved "no link" results stay in use until each todo leaves the list.
 
-那次量測時一天只跑四輪。2026-09-28 起改成兩個排程任務，每小時 50 分與 20 分各一個時段，45 分鐘內剛跑完一輪的時段會在模型啟動前被 hook 擋掉，所以實際大約每小時跑完一輪，白天約十六輪，那份歸因已經不代表現在的用量。這本身不構成重開的理由，要重開仍然要先拿出新的歸因資料。
+## Do not touch INSTRUCTIONS.md to save tokens
+
+Measured and rejected on 2026-09-20. The four Gmail tasks did not rank as a single line in the 24-hour usage attribution of Claude Code `/usage`, and three paragraphs that looked as if they were only for people each turned out, when checked one by one, to carry runtime rules. **Rarely used does not mean unused at runtime.** Compressing the procedure and reading less of each message body were rejected too. The first would change judgements the user confirmed. The second breaks the rule that missing a message that needed action is far worse than sending one extra notification, and this task fails silently.
+
+To reopen this, first bring new attribution data showing that scheduled runs take a significant share, or a run failure traceable to how the instruction file is organized. Without either, do not measure again.
+
+That measurement was taken when there were only four runs a day. Since 2026-09-28 there are two scheduled tasks, one at 50 and one at 20 minutes past each hour, and a slot that comes within 45 minutes of a completed round is blocked by a hook before the model starts. In practice about one round finishes per hour, roughly sixteen in the daytime, so that attribution no longer reflects current usage. This alone is not a reason to reopen, which still needs new attribution data first.

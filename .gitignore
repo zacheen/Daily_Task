@@ -48,6 +48,10 @@ Personal_Task/
 # keeps off it. Absolute paths in it are machine-specific anyway.
 .claude/settings.local.json
 
+# Config for shared/deploy_skills.py. The tracked skill_deploy.example.toml
+# beside it is what a fresh clone copies into place.
+shared/skill_deploy.toml
+
 # Deliberation transcripts from the gather-thoughts workflow. They quote this
 # machine's own usage and spend figures while comparing options, which is
 # per-machine and nobody else's business.

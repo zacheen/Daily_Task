@@ -1,0 +1,8 @@
+# Template for skill_deploy.toml. Copy it to skill_deploy.toml in this folder,
+# which is gitignored, and edit the copy. deploy_skills.py reads only the copy.
+#
+# Settings for deploy_skills.py, shared by every scheduled task it deploys.
+# report_language sets the language of a run's final reply, plus any output the
+# task's own rule file ties to it. Other files and notifications keep their own
+# language (see LANGUAGE_LINE there).
+report_language = "English"
