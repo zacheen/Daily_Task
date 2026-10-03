@@ -28,9 +28,11 @@ The subject link opens the message in the mailbox that originally received it, n
 
 Changing those link rules means running `gmail_mcp/test_origin_links.py`. After changing the link format or the rules, increase `LINKS_VERSION` in `task_list_gui.py` by one. When the page sees a different version it drops the whole cache and looks everything up again. Otherwise the old links and the saved "no link" results stay in use until each todo leaves the list.
 
-## Do not touch INSTRUCTIONS.md to save tokens
+## Do not compress INSTRUCTIONS.md to save tokens
 
-Measured and rejected on 2026-09-20. The four Gmail tasks did not rank as a single line in the 24-hour usage attribution of Claude Code `/usage`, and three paragraphs that looked as if they were only for people each turned out, when checked one by one, to carry runtime rules. **Rarely used does not mean unused at runtime.** Compressing the procedure and reading less of each message body were rejected too. The first would change judgements the user confirmed. The second breaks the rule that missing a message that needed action is far worse than sending one extra notification, and this task fails silently.
+On 2026-10-02 the user decided to translate `Email_Check/INSTRUCTIONS.md` into English to save tokens. A translation keeps every rule and every confirmed judgement, so it is not what the rest of this section rejects. The text the user reads, meaning the toasts and the task list fields in `round.json`, stays in Traditional Chinese, set by the language paragraph deployed into SKILL.md and stated again in the file's Goal section. The UI labels the code and the web page match, such as 待分類, 追蹤中 and 普通, stay in Chinese inside the English text.
+
+Compression was measured and rejected on 2026-09-20. The four Gmail tasks did not rank as a single line in the 24-hour usage attribution of Claude Code `/usage`, and three paragraphs that looked as if they were only for people each turned out, when checked one by one, to carry runtime rules. **Rarely used does not mean unused at runtime.** Compressing the procedure and reading less of each message body were rejected too. The first would change judgements the user confirmed. The second breaks the rule that missing a message that needed action is far worse than sending one extra notification, and this task fails silently.
 
 To reopen this, first bring new attribution data showing that scheduled runs take a significant share, or a run failure traceable to how the instruction file is organized. Without either, do not measure again.
 

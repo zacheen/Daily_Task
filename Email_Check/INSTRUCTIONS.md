@@ -1,748 +1,510 @@
-# Gmail 重要信檢查 指令檔
+# Gmail important-mail check, instruction file
 
-這是兩個排程任務共用的唯一指令來源，一個在每小時 50 分（06:50 到 21:50），一個在每小時 20 分（07:20 到 22:20）。2026-09-28 以前是一天四個時段 06:25、11:40、16:55、22:10。
-排程任務本身的 SKILL.md 只是一行 stub，不要把規則寫回去那邊。
+This is the single instruction source shared by two scheduled tasks, one at 50 minutes past each hour (06:50 to 21:50) and one at 20 minutes past each hour (07:20 to 22:20). Before 2026-09-28 there were four slots a day, 06:25, 11:40, 16:55 and 22:10. The scheduled task's own SKILL.md is only a one-line stub, so do not write rules back into it.
 
-## 職責分界
+## Division of responsibilities
 
-| 誰 | 負責什麼 |
+| Who | Responsible for |
 |---|---|
-| `statemachine.py` | 時間窗、區間覆蓋、水位、去重佇列、原子寫檔 |
-| `shared/gmail-gate-hook.ps1` 加 `statemachine.py gate` | 在模型開始之前決定這一輪要不要直接跳過，見「跳過的判斷在模型開始之前做」 |
-| 你（LLM） | 呼叫 Gmail MCP、**判斷重要性**、寫推播文字 |
+| `statemachine.py` | Time window, interval coverage, watermark, dedupe queue, atomic file writes |
+| `shared/gmail-gate-hook.ps1` plus `statemachine.py gate` | Decides before the model starts whether this round is skipped outright, see the section The skip decision happens before the model starts |
+| You (the LLM) | Calling the Gmail MCP, **judging importance**, writing the push notification text |
 
-**凡是腳本告訴你的事，照做，不要自己重算。**
-時間窗與水位的推進規則刻意不寫在這裡，因為那些必須是確定性的。
-散文規則被冷讀誤解過太多次，所以那部分已經移出去了。
-腳本用查詢邊界自己二分來證明覆蓋完整，不依賴信件上顯示的時間，
-因為 Gmail 過濾的是 internalDate、而顯示的 Date 標頭落後它一段沒有上限的差值。
+**Whatever the script tells you, do it, and do not recompute it yourself.** The rules for advancing the time window and the watermark are deliberately not written here, because they must be deterministic. Prose rules were misunderstood on cold reads too many times, so that part has been moved out. The script proves coverage is complete by bisecting on the query boundaries itself, and does not rely on the time shown on a message, because Gmail filters on internalDate while the displayed Date header lags behind it by a difference with no upper bound.
 
-要改**判斷標準**，改這個檔案。
-要改**時間窗或狀態邏輯**，改 `statemachine.py`，並跑 `test/test_statemachine.py`。
+To change the **judgement criteria**, change this file. To change the **time window or state logic**, change `statemachine.py` and run `test/test_statemachine.py`.
 
-## 目標
-檢查 Gmail 帳號 `scout` 自上次檢查以來的新信，判斷有沒有重要的信。
-只有在確實有重要信時才推播通知。
+## Goal
+Check the Gmail account `scout` for new mail since the last check, and judge whether any of it is important. Push a notification only when there really is important mail.
 
-Gmail MCP 工具的 account 參數一定要傳 `"scout"`。這個帳號代號是唯一的識別方式，
-**不要去查它對應的實際信箱地址，也不要把地址寫進任何輸出**。
-傳成別的值會抓到另一個信箱。
+Everything the user reads is written in the language the last paragraph of SKILL.md names, which is Traditional Chinese. That covers the toast messages and every text field in `round.json` that the task list shows, such as `summary` and `action`. The Chinese examples in this file show that form, and the UI labels such as 待分類 and 追蹤中 stay exactly as written.
 
-## 最高原則
-漏掉一封該辦的信，比多發一則通知糟得多。所有取捨都往這個方向倒。
+The account parameter of the Gmail MCP tools must always be `"scout"`. This account alias is the only means of identification. **Do not look up the actual mailbox address it maps to, and do not write the address into any output**. Passing any other value fetches a different mailbox.
 
-- **資訊不足不等於不重要。** 判斷不出來的信要留到下一輪，不可以當成不重要丟掉
-- **失敗不等於沒有新信。** 搜尋失敗時回報 `--failed`，不要當成零封
-- **通知失敗不等於已通知。** 只有確定送出成功才寫進 `notifiedIds`，
-  而「送出成功」的定義就是第 5 步那唯一一個管道回 `Toast sent.`。
-  通知只有這一條路，沒有備援管道可以退而求其次
+## Top principle
+Missing one message that needed action is far worse than sending one extra notification. Every trade-off leans in this direction.
 
-## 省用量原則
-這個任務一天排了 32 個時段，45 分鐘內成功檢查過的時段會在模型開始前被擋掉，實際大約每小時真正跑一輪。token 成本會乘以真正執行的次數。在不違反最高原則的前提下遵守。
+- **Insufficient information does not mean unimportant.** A message you cannot judge must be kept for the next round, and must not be discarded as unimportant
+- **A failure does not mean no new mail.** When a search fails, report `--failed`, and do not treat it as zero messages
+- **A failed notification does not mean notified.** Write to `notifiedIds` only when sending definitely succeeded, and "sent successfully" is defined as the one and only channel in step 5 returning `Toast sent.`. Notification has only this one path, and there is no backup channel to fall back on
 
-- 優先用 search 結果自帶的 snippet 判斷。snippet 是免費附帶的，不需要額外呼叫
-- 寄件人、主旨或 snippet 已經足以判斷時，一律不要讀內文。
-  但**判斷不出來的時候就要讀**，讀內文沒有次數上限，見「什麼時候該讀內文」
-- 不要寫報告、不要輸出中間清單、不要摘要不重要的信
+## Usage-saving principle
+This task is scheduled for 32 slots a day. A slot within 45 minutes of a successful check is blocked before the model starts, so in practice about one round really runs per hour. Token cost is multiplied by the number of rounds that actually run. Follow this principle as long as it does not violate the Top principle.
 
-## 所需權限與固定命令
+- Prefer judging from the snippet that comes with the search results. The snippet comes along for free and needs no extra call
+- When the sender, subject or snippet is already enough to judge, never read the body. But **when you cannot judge, read it**. Reading the body has no limit on the number of times, see the section When to read the body
+- Do not write a report, do not output intermediate lists, and do not summarize unimportant mail
 
-排程任務是無人值守執行的。**卡在權限提示上就等於整輪沒跑，而且不會有人按允許。**
-這比任何漏信 bug 都致命，因為連告警都發不出來。
+## Required permissions and fixed commands
 
-腳本一律用這個形式呼叫，**字串固定，不要改寫**，因為 allowlist 是逐字比對的。
+Scheduled tasks run unattended. **Getting stuck on a permission prompt is the same as the whole round not running, and nobody will press Allow.** This is more fatal than any missed-mail bug, because not even an alert can be sent.
 
-**所有命令一律用 Bash 工具跑，包括這份文件沒列出的。** 用 PowerShell 工具跑同一行也有規則放行，但那是模型沒照做時的保險，不是正常路徑。
+Always call the script in this form. **The string is fixed and must not be rewritten**, because the allowlist matches it word for word.
+
+**Run every command with the Bash tool, including ones this document does not list.** A rule also lets the same line through when it is run with the PowerShell tool, but that is insurance for when the model does not follow this, not the normal path.
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" <subcommand>
 ```
 
-### 只能跑清單上那幾行命令
+### Only the commands on the list may run
 
-allowlist 是逐字比對的，**不在上面的命令會停在權限提示，而排程執行時沒有人會按允許**。
-所以整輪能跑的 Bash 與 PowerShell 命令就是下面這個封閉清單，沒有第五種。
+The allowlist matches word for word, so **a command not on it stops at a permission prompt, and during a scheduled run nobody will press Allow**. So the Bash and PowerShell commands the whole round may run are the closed list below, and there is no fifth kind.
 
-| 命令 | 在哪一步 |
+| Command | In which step |
 |---|---|
-| `statemachine.py` 的 `begin` / `wait` / `step` / `commit` | 第 1、3、6 步 |
-| `calendar_check.py` | 第 4 步 |
-| `notify.ps1` | 第 5 步 |
-| `open-task-list.ps1` | 第 7 步 |
+| `begin` / `wait` / `step` / `commit` of `statemachine.py` | Steps 1, 3, 6 |
+| `calendar_check.py` | Step 4 |
+| `notify.ps1` | Step 5 |
+| `open-task-list.ps1` | Step 7 |
 
-`statemachine.py gate` 不在這張表上，因為它是 hook 在你開始之前替你跑的，你讀得到這份文件就代表它已經回了照跑。**不要自己再跑一次。**
+`statemachine.py gate` is not in this table, because the hook runs it for you before you start, and the fact that you can read this document means it already returned that the round runs as usual. **Do not run it again yourself.**
 
-**不要為了省 token 自己拼一行命令去翻檔案。** 這是真的發生過的故障。
-有一輪讀完內文、正要寫 `round.json` 之前，跑了一行
-`conda run -n ML python -c ...` 去印 `statemachine.py` 裡 `cmd_step` 的原始碼，
-卡在提示上，整輪就停在那裡。省用量原則在這一條前面要讓位，
-因為卡住的代價是整輪歸零，省下的只是幾百個 token。
+**Do not compose a command of your own to look through a file in order to save tokens.** This is a failure that really happened. One round, after reading the bodies and just before writing `round.json`, ran the line `conda run -n ML python -c ...` to print the source code of `cmd_step` in `statemachine.py`, got stuck on the prompt, and the whole round stopped there. The Usage-saving principle gives way to this rule, because the cost of getting stuck is the whole round going to zero, while what is saved is only a few hundred tokens.
 
-那行命令就算有人按了允許也跑不起來。`conda run` 不支援參數裡含換行，
-多行的 `python -c` 會直接拋 `NotImplementedError`，所以它本來就是死路。
+That command would not have run even if someone had pressed Allow. `conda run` does not support arguments containing a newline, and a multi-line `python -c` throws `NotImplementedError` right away, so it was a dead end from the start.
 
-要看檔案內容一律用 **Read 工具**，它涵蓋 `Email_Check/` 底下所有檔案，不會提示。
+To view a file's contents, always use the **Read tool**. It covers every file under `Email_Check/` and does not prompt.
 
-這份文件的 status 表加上第 6 步的 `round.json` 格式就是**完整的介面契約**，
-跟腳本內部怎麼實作無關。
+The status table in this document plus the `round.json` format in step 6 are the **complete interface contract**, independent of how the script is implemented internally.
 
-### 規則要同時放兩層
+### Rules go in both layers
 
-**這些規則要同時放在專案的 `.claude/settings.local.json` 與使用者層的
-`~\.claude\settings.json`。** 使用者層只放絕對路徑的形式，
-相對路徑的留在專案檔。
+**These rules must be placed in both the project's `.claude/settings.local.json` and the user-level `~\.claude\settings.json`.** The user level holds only the absolute-path forms, and the relative-path ones stay in the project file.
 
-理由是有一則已知故障但**原因尚未查明**。2026-09-09 21:32 那一輪的 toast 命令
-卡在權限提示上，儘管專案檔裡有逐字相符的 `PowerShell(& "...notify.ps1" *)`。
-提示會一直留在 app 裡等人按，沒人按就整輪不跑，而且不會有任何告警。
+The reason is a known failure whose **cause has not yet been found**. In the 2026-09-09 21:32 round the toast command got stuck on a permission prompt, even though the project file had a word-for-word match `PowerShell(& "...notify.ps1" *)`. The prompt stays in the app waiting for someone to press it, and if nobody does, the whole round does not run, and there is no alert of any kind.
 
-**不要說「專案設定檔在排程時不會被載入」**，那個推測 2026-09-10 已被實測推翻：
-Qualification 任務每天寫 `Personal_Task/Qualification/reports/` 與 `Personal_Task/Qualification/baseline.md`，連續七天都成功，
-而涵蓋那些路徑的規則只存在專案檔裡。所以專案層是會生效的。
+**Do not say "the project settings file is not loaded during scheduled runs".** That guess was disproved by measurement on 2026-09-10. The Qualification task writes `Personal_Task/Qualification/reports/` and `Personal_Task/Qualification/baseline.md` every day and succeeded seven days in a row, while the rules covering those paths exist only in the project file. So the project layer does take effect.
 
-真正的原因還沒確定。目前最可疑的是命令開頭那個 `&`：它是 PowerShell 的呼叫運算子，
-但如果權限比對用的是跟 Bash 共用的命令剖析器，`&` 會被當成分隔符而讓
-`prefix *` 永遠對不上。
+The real cause is not yet determined. The current main suspect is the `&` at the start of the command. It is PowerShell's call operator, but if permission matching uses the command parser shared with Bash, `&` would be treated as a separator, so `prefix *` would never match.
 
-**2026-09-10 又卡了一次，這次是 Qualification 任務，於是全面改用不含 `&` 的形式。**
-所有呼叫端現在一律走 Bash 工具加
-`powershell.exe -NoProfile -File "...notify.ps1" -Message ... -Title ...`，
-該形式已實測可送出中文 toast，且其 allow 規則本來就在兩層裡。
-`&` 形式的規則暫時留在兩層設定檔中沒有刪除，但已無任何呼叫端使用，不要改回去。
+**On 2026-09-10 it got stuck again, this time in the Qualification task, so everything switched to forms without `&`.** Every caller now goes through the Bash tool plus `powershell.exe -NoProfile -File "...notify.ps1" -Message ... -Title ...`, a form measured to send a Chinese toast, and its allow rule was already in both layers. The rules in the `&` form are left in both settings files for now and not deleted, but no caller uses them any more, so do not switch back.
 
-同時放兩層的價值不是「因為專案層沒用」，而是把工作目錄從變數裡拿掉，
-兩層都相符時無論原因是什麼都不會少一條。
+The value of placing rules in both layers is not "because the project layer does not work". It is that the working directory is removed as a variable, so when both layers match, not a single rule goes missing, whatever the cause.
 
-**deny 也要一起鏡射。** 只鏡射 allow 的話，使用者層的 `Edit(...Email_Check\**)`
-會允許編輯那四個請求檔，而擋住它們的 deny 只在專案檔裡，等於憑白放寬。
+**Mirror deny as well.** If only allow is mirrored, the user-level `Edit(...Email_Check\**)` would allow editing those four request files, while the deny that blocks them exists only in the project file, which loosens permissions for nothing.
 
-寫規則進 JSON 時小心反斜線。`"...task_list\tasks-restore.json"` 在 Python 字串裡
-`\t` 就是一個 tab，`json.dumps` 會忠實地把它寫成 `\\t` 轉義，規則於是壞掉，
-而且在檔案裡看不出來。反斜線一律用 `chr(92)` 組出來。
+Be careful with backslashes when writing rules into JSON. In a Python string, the `\t` in `"...task_list\tasks-restore.json"` is a tab, and `json.dumps` faithfully writes it as the `\\t` escape, so the rule breaks, and this cannot be seen in the file. Always build backslashes with `chr(92)`.
 
-兩層設定檔的 `permissions.allow` 都必須包含
+The `permissions.allow` of both settings files must include the following.
 
-| 條目 | 用途 |
+| Entry | Purpose |
 |---|---|
-| `Bash(conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py"*)` | 狀態機 |
-| `Bash(conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_check.py"*)` | 日曆檢查 |
-| `mcp__gmail__search_emails` | 抓信 |
-| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1"*)` | 本機 toast 通知，現行形式 |
-| `PowerShell(& "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" *)` | 舊形式，已無呼叫端，保留備查 |
-| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"*)` | 開待辦清單，現行形式 |
-| 上面四條現行 Bash 規則各自的 `PowerShell(...)` 版，括號內的字串逐字相同 | 模型改用 PowerShell 工具跑同一行命令時的保險，見表格下方 |
-| `mcp__gmail__get_email_body` | 讀內文 |
-| `Read(Email_Check/**)` 與絕對路徑版 | 讀這個檔案與 config.json |
-| `Edit(Email_Check/**)` 與絕對路徑版 | 寫 round.json |
-| `Bash(grep:*)` / `Bash(sed -n:*)` / `Bash(head:*)` / `Bash(tail:*)` | 唯讀的保險絲，見上一節，正常流程不該用到 |
+| `Bash(conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py"*)` | State machine |
+| `Bash(conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_check.py"*)` | Calendar check |
+| `mcp__gmail__search_emails` | Fetch mail |
+| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1"*)` | Local toast notification, current form |
+| `PowerShell(& "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" *)` | Old form, no callers left, kept for reference |
+| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"*)` | Open the 待辦清單 (task list), current form |
+| The `PowerShell(...)` version of each of the four current Bash rules above, with the string inside the parentheses identical word for word | Insurance for when the model runs the same command with the PowerShell tool, see below the table |
+| `mcp__gmail__get_email_body` | Read the body |
+| `Read(Email_Check/**)` and its absolute-path version | Read this file and config.json |
+| `Edit(Email_Check/**)` and its absolute-path version | Write round.json |
+| `Bash(grep:*)` / `Bash(sed -n:*)` / `Bash(head:*)` / `Bash(tail:*)` | Read-only fuses, see the previous section, the normal flow should never need them |
 
-那四條唯讀形式是保險絲，不是許可，不能拿來翻 `statemachine.py` 的原始碼。
+Those four read-only forms are fuses, not permissions, and must not be used to look through the source code of `statemachine.py`.
 
-**allow 規則綁在工具上，同一行命令換個工具就對不上。** `Bash(...)` 規則只比對 Bash 工具的呼叫，模型如果改用 PowerShell 工具跑一字不差的同一行命令，照樣會停在提示上。這台機器上的 Claude Code 把 PowerShell 當主要 shell，而第 1 步那種沒註明工具的命令區塊，每一輪用哪個工具等於由模型臨場決定。gmail-check-2210 在 2026-09-23 與 2026-09-25 兩輪都是這樣用 PowerShell 跑 `begin`，兩輪都卡在提示上，前一輪連 status 都沒拿到，也沒有任何告警。到 2026-09-25 為止的 70 輪裡只有這 2 輪選了 PowerShell，其餘都是 Bash，而四個任務的 SKILL.md 只差名稱與說明兩行，所以這不是哪個任務特有的問題，每個任務都可能抽到。2026-09-26 補上 PowerShell 版之後，用 `claude -p --tools PowerShell --permission-mode default` 分別只載入使用者層、只載入專案層，跑狀態機與日曆的 `--help`，兩層都沒有被拒，同樣方式跑一行清單外的命令則被拒。`notify.ps1` 與 `open-task-list.ps1` 的 PowerShell 版沒有實測，因為跑下去會真的跳通知、開視窗。這個現象是 2026-09-22 排程改用新模型之後才出現的，之前 55 輪全部走 Bash，之後到 2026-09-27 的 20 輪裡有 3 輪走 PowerShell，模型與 Claude Code 版本是同一天一起換的，分不出是哪一個造成。所以從 2026-09-27 起每一步的命令都明寫用 Bash 工具跑，PowerShell 版規則留著當保險。
+**An allow rule is bound to a tool, so the same command run with a different tool does not match.** A `Bash(...)` rule matches only calls of the Bash tool, so if the model instead runs the identical command with the PowerShell tool, it still stops at a prompt. Claude Code on this machine treats PowerShell as the primary shell, and for a command block that does not name a tool, like the one in step 1, which tool gets used each round is in effect decided by the model on the spot. gmail-check-2210 ran `begin` with PowerShell this way in two rounds, on 2026-09-23 and 2026-09-25, and both rounds got stuck on the prompt. The earlier of the two did not even get a status, and there was no alert of any kind. Of the 70 rounds up to 2026-09-25, only these 2 chose PowerShell and all the rest used Bash, and the SKILL.md files of the four tasks differ only in the two lines of name and description, so this is not a problem specific to one task, and any task can draw it. After the PowerShell versions were added on 2026-09-26, running the `--help` of the state machine and of the calendar check with `claude -p --tools PowerShell --permission-mode default`, loading only the user layer and then only the project layer, was not denied in either layer, while running a command outside the list the same way was denied. The PowerShell versions for `notify.ps1` and `open-task-list.ps1` were not measured, because running them would really pop up a notification and open a window. This behaviour appeared only after the schedule switched to a new model on 2026-09-22. Before that all 55 rounds went through Bash, and after it 3 of the 20 rounds up to 2026-09-27 went through PowerShell. The model and the Claude Code version were changed together on the same day, so it cannot be told which one caused it. So from 2026-09-27 on, the command of every step says explicitly to run it with the Bash tool, and the PowerShell-version rules stay as insurance.
 
-**上面那張表不是專案檔的全部。** 同一份 `.claude/settings.local.json` 服務這個
-工作目錄底下的每一個排程任務，而 `Personal_Task/` 裡的任務另有自己的網域與路徑規則，
-那些規則不能寫進這份文件，因為這個 repo 是公開的。各自的規格寫在 `Personal_Task/` 底下該任務自己的 README.md 裡。
-重建專案檔時要兩邊都看過，只照這張表重建會漏掉一半，
-而漏掉的那一半是在排程時無聲失敗，不是在互動時報錯。
+**The table above is not the whole of the project file.** The same `.claude/settings.local.json` serves every scheduled task under this working directory, and the tasks in `Personal_Task/` have their own domain and path rules, which cannot be written into this document because this repo is public. Each one's spec is written in that task's own README.md under `Personal_Task/`. When rebuilding the project file, look at both sides. Rebuilding from this table alone misses half, and the missing half fails silently during scheduled runs instead of raising an error interactively.
 
-兩層設定檔裡另外還留著一條舊的 `Start-Process` 規則，它直接寫死本機的
-`pythonw.exe` 路徑。**已無呼叫端，保留備查，不要改回去用它。** 那個路徑含本機使用者
-名稱，所以只存在於不進版控的設定檔裡，這份文件不重複它。
+Both settings files also still keep an old `Start-Process` rule that hard-codes the local `pythonw.exe` path. **It has no callers left and is kept for reference. Do not switch back to using it.** That path contains the local user name, so it exists only in the settings files that are not under version control, and this document does not repeat it.
 
-**`Write(路徑)` 形式的規則不會被比對，只有 `Edit(路徑)` 會**，而 `Edit` 規則涵蓋所有
-檔案編輯工具（包含建立新檔）。路徑類條目要同時放相對與絕對兩種形式，
-因為排程執行時的工作目錄不保證。
+**Rules in the `Write(路徑)` form are never matched, only `Edit(路徑)` is**, and an `Edit` rule covers every file-editing tool (including creating a new file). Path entries must be placed in both relative and absolute forms, because the working directory during a scheduled run is not guaranteed.
 
-以後新增任何工具呼叫或命令，**必須同時加進 allowlist**。
-沒做的話互動測試看起來正常，排程執行時會靜默卡住。
+From now on, any new tool call or command **must be added to the allowlist at the same time**. If it is not, interactive tests look normal, and scheduled runs get stuck silently.
 
-### 跳過的判斷在模型開始之前做
+### The skip decision happens before the model starts
 
-專案的 `.claude/settings.local.json` 除了權限，還有一段 `hooks.UserPromptSubmit`，命令是 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:/dont_move/git_save/Daily_Task/shared/gmail-gate-hook.ps1"`，逾時 60 秒。重建那個檔的時候這一段也要補回去。它只放專案層，不鏡射到使用者層，因為兩層都放會讓同一個提示被檢查兩次，而且這一段不見時的下場只是每一輪都照跑，不會漏掉任何一次檢查。
+Besides permissions, the project's `.claude/settings.local.json` also has a `hooks.UserPromptSubmit` section, whose command is `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:/dont_move/git_save/Daily_Task/shared/gmail-gate-hook.ps1"` with a timeout of 60 seconds. When rebuilding that file, this section must be restored too. It goes only in the project layer and is not mirrored to the user layer, because placing it in both layers would check the same prompt twice, and the consequence of this section going missing is only that every round runs as usual, without missing a single check.
 
-這支 hook 只對開頭是 `<scheduled-task name="gmail-check-` 的提示動作，那是桌面 app 排程自己包在提示外面的標記，其餘提示在啟動 Python 之前就放行。對上標記才跑 `statemachine.py gate`，回 `SKIP` 就擋下提示，這一輪在模型開始之前就結束，一個 token 都不花。`gate` 回 `SKIP` 的條件是以下全部成立，其餘任何情況一律照跑，包括 hook 本身出錯或逾時。
+This hook acts only on a prompt that starts with `<scheduled-task name="gmail-check-`, which is the marker the desktop app's scheduler itself wraps around the prompt, and every other prompt is let through before Python starts. Only when the marker matches does it run `statemachine.py gate`, and when that returns `SKIP` it blocks the prompt, so the round ends before the model starts and spends not a single token. `gate` returns `SKIP` only when all of the following hold, and in every other case the round runs as usual, including when the hook itself errors or times out.
 
-- 上一次成功的 `commit` 在 45 分鐘內，時間也不在未來
-- `pendingNotify` 是空的，沒有欠著的通知
-- `coverage.intervals` 是空的，沒有沒掃完的區間
-- 沒有欠著的 config 警示
-- `state.json` 讀得出來
+- The last successful `commit` was within 45 minutes, and its time is not in the future
+- `pendingNotify` is empty, with no notification owed
+- `coverage.intervals` is empty, with no interval left unscanned
+- No config warning is owed
+- `state.json` can be read
 
-正在跑的另一輪**刻意不算**跳過的理由。被它擋下的那一輪要走到 `begin` 與 `wait`，前一輪死掉時才有人接手。
+Another round that is currently running is **deliberately not counted** as a reason to skip. The round it would block has to get as far as `begin` and `wait`, so that someone takes over when the earlier round has died.
 
-之所以放在模型開始之前，是因為在 session 裡判斷太貴。2026-09-27 量過一輪讀完這份文件、跑完 `begin` 與 `wait` 才結束的跳過，寫入快取 60,219、讀取 234,470，將近一整輪的成本，其中約 23k 是 session 開頭本身、約 37k 是這份文件。
+The decision sits before the model starts because making it inside the session is too expensive. On 2026-09-27 a skip that ended only after reading this document and running `begin` and `wait` was measured at a cache write of 60,219 and a cache read of 234,470, close to the cost of a whole round, of which about 23k was the start of the session itself and about 37k was this document.
 
-同日實測的結果如下。桌面 app 的排程確實會觸發專案層的 `UserPromptSubmit`，派送後約 5 秒就收到。在一輪提交之後立刻手動觸發另一個任務，那一輪被擋下，0 turns、5 秒結束，Runs 面板照樣記成 `succeeded`，這與 `Known_concern.md` 第 1 條一致。無頭模式另外確認了擋下時輸入與快取 token 都是 0，以及 hook 逾時的時候提示會照常送出。代價是這個專案裡每一個互動提示都要多等 PowerShell 啟動，約 0.7 秒，對上標記的排程提示則因為 `conda run` 要約 5 秒。
-
-## 流程
+The results measured the same day are as follows. The desktop app's scheduler does trigger the project-level `UserPromptSubmit`, which arrived about 5 seconds after dispatch. When another task was triggered manually right after a round had committed, that triggered round was blocked, ending with 0 turns in 5 seconds, and the Runs panel still recorded it as `succeeded`, which is consistent with entry 1 of `Known_concern.md`. Headless mode additionally confirmed that input and cache tokens are both 0 when a prompt is blocked, and that when the hook times out the prompt is sent as usual. The cost is that every interactive prompt in this project waits about 0.7 seconds longer for PowerShell to start, and a scheduled prompt that matches the marker waits about 5 seconds because of `conda run`.
+## Procedure
 
 
-### 腳本回傳的 status 一覽
+### Statuses the script returns
 
-四個子命令共用這張表。**表上沒有的 status 一律當成異常**，推播告知後結束，不要猜。
+All four subcommands share this table. **Treat any status not in the table as an anomaly**, send a notification saying so and then end, and do not guess.
 
-| `status` | 子命令 | 意思 | 你要做什麼 |
+| `status` | Subcommand | Meaning | What you do |
 |---|---|---|---|
-| `PROCEED` | begin | 正常開始 | 照第 1 步繼續 |
-| `ROUND_ALREADY_RUNNING` | begin | 另一輪 20 分鐘內還寫過進度，正在跑 | **改跑 `wait`**（見表格下方），不要碰 Gmail、不要推播 |
-| `STILL_RUNNING` | wait | 那一輪還在跑，這次等滿了 | **再跑一次 `wait`** |
-| `COVERED` | wait | 那一輪已經提交，這段時間它掃過了 | **這輪安靜結束。** 不要重跑 `begin`、不要推播 |
-| `TAKE_OVER` | wait | 那一輪超過 20 分鐘沒寫進度，當成已經死了 | **回第 1 步重跑 `begin`**，由這輪接手 |
-| `SEARCH` | step | 還有區間要掃 | 拿新的 `nextQuery` 回第 3 步開頭 |
-| `DONE` | step | 這輪搜尋掃完了 | 進第 4 步 |
-| `SEARCH_FAILED` | step | 你回報了搜尋失敗，區間留給下一輪 | **第 2 步已判定為重要的欠帳照樣推播**，不要因為新信搜尋失敗就把已確認的重要信吞掉 |
-| `COMMITTED` | commit | 這輪已經原子提交 | 讀它的欄位收尾（見第 6、7 步），這輪結束 |
-| `ABORT_STATE_CORRUPT` | begin / step / commit | `state.json` 壞了 | **推播告知後結束。不要碰 Gmail，不要試著修狀態檔** |
-| `NO_ROUND_IN_PROGRESS` | step / commit | 這輪的 `round-progress.json` 不見了或讀不出來 | **這輪放棄，安靜結束。** 不要重跑 `begin`，不要推播 |
-| `FINDINGS_UNREADABLE` | step / commit | `round.json` 讀不出來，或 `roundToken` 不屬於這輪 | **這輪放棄，安靜結束。** 不要重試同一個 `step`，更不要當成 `DONE` |
-| `STATE_CHANGED_ABORT` | begin / step / commit | 另一輪在這輪讀完狀態之後寫了 `state.json`，這輪的寫入被擋下來了 | **這輪放棄，安靜結束。** 不要重跑、不要推播 |
+| `PROCEED` | begin | Normal start | Continue with step 1 |
+| `ROUND_ALREADY_RUNNING` | begin | Another round wrote progress within the last 20 minutes and is running | **Run `wait` instead** (see below the table), do not touch Gmail, do not send a notification |
+| `STILL_RUNNING` | wait | That round is still running, and this wait ran its full length | **Run `wait` again** |
+| `COVERED` | wait | That round has committed, and it scanned this period | **End this round quietly.** Do not rerun `begin`, do not send a notification |
+| `TAKE_OVER` | wait | That round has written no progress for over 20 minutes and is treated as dead | **Go back to step 1 and rerun `begin`**, and this round takes over |
+| `SEARCH` | step | Ranges remain to scan | Take the new `nextQuery` back to the start of step 3 |
+| `DONE` | step | This round's search is finished | Go to step 4 |
+| `SEARCH_FAILED` | step | You reported a search failure, and the range is left for the next round | **Still send notifications for the backlog that step 2 already judged important**. Do not swallow confirmed important mail because the search for new mail failed |
+| `COMMITTED` | commit | This round has been committed atomically | Read its fields to wrap up (see steps 6 and 7), and this round ends |
+| `ABORT_STATE_CORRUPT` | begin / step / commit | `state.json` is corrupt | **Send a notification saying so, then end. Do not touch Gmail, and do not try to repair the state file** |
+| `NO_ROUND_IN_PROGRESS` | step / commit | This round's `round-progress.json` is missing or unreadable | **Abandon this round and end quietly.** Do not rerun `begin`, do not send a notification |
+| `FINDINGS_UNREADABLE` | step / commit | `round.json` is unreadable, or the `roundToken` does not belong to this round | **Abandon this round and end quietly.** Do not retry the same `step`, and above all do not treat it as `DONE` |
+| `STATE_CHANGED_ABORT` | begin / step / commit | Another round wrote `state.json` after this round finished reading the state, so this round's write was blocked | **Abandon this round and end quietly.** Do not rerun, do not send a notification |
 
-後三者為什麼可以安靜放棄，而不是漏信。區間**刻意沒有**被退休，所以下一輪會重新掃
-同一段時間；而這輪較早幾批已經判定為重要的信，在它們各自的 `step` 當下就已經寫進
-佇列了，下一輪的 `notifyNow` 會把它們重推。放棄的只有還沒落地的那一批，
-那一批的時間區間也還在。
+Why the last three can abandon quietly without missing mail. The range was **deliberately not** retired, so the next round rescans the same period. Mail that earlier batches of this round already judged important was written into the queue at the moment of its own `step`, and the next round's `notifyNow` re-sends it. Only the batch that has not landed yet is abandoned, and that batch's time range is still there too.
 
-`STATE_CHANGED_ABORT` 特別要強調一點，它不是故障而是防護生效了。兩個排程共用一份
-狀態，補跑或手動執行時可能兩輪重疊，腳本寧可讓後到的那輪整個放棄，也不要讓它把先到那輪的
-待辦與水位蓋掉。**贏的那輪的狀態才是對的**，所以不要試著把你這輪的結果補寫回去，
-也不要因此推播。推了只會變成一則使用者無從處理的假告警。
+One point about `STATE_CHANGED_ABORT` needs stressing. It is not a fault but the safeguard taking effect. The two schedules share one state, and during a catch-up run or a manual run two rounds may overlap. The script would rather have the later round abandon entirely than let it overwrite the earlier round's todos and watermark. **The winning round's state is the correct one**, so do not try to write your round's results back in, and do not send a notification because of it. Sending one would only produce a false alarm the user has no way to act on.
 
-`NO_ROUND_IN_PROGRESS` 最常見的成因不是壞檔，是另一個排程任務的 `commit`
-把共用的 `round-progress.json` 清掉了。那代表有別人正在處理，你安靜退出才對。
+The most common cause of `NO_ROUND_IN_PROGRESS` is not a corrupt file but the other scheduled task's `commit` clearing the shared `round-progress.json`. That means someone else is handling it, and the right thing is for you to exit quietly.
 
-`ROUND_ALREADY_RUNNING` 是給關機後補跑用的。錯過時段的任務會在 app 重開時同時觸發，但任何一輪都會掃完上一輪之後的整段時間，所以只要一輪就夠了。第一個跑 `begin` 的那輪照常進行，其餘的在 `begin` 就收到這個 status，這時候腳本什麼都還沒寫。**收到它不要直接結束，改跑下面這行等那一輪的結果。** 用 Bash 工具跑，一次最多等 90 秒。
+`ROUND_ALREADY_RUNNING` exists for catch-up runs after a shutdown. Tasks that missed their slots all fire at once when the app reopens, but any one round scans the whole period since the previous round, so one round is enough. The first round to run `begin` proceeds as usual, and the rest receive this status at `begin`, at which point the script has not written anything yet. **On receiving it, do not simply end. Run the line below instead to wait for that round's result.** Run it with the Bash tool. Each call waits at most 90 seconds.
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" wait
 ```
 
-回 `STILL_RUNNING` 就再跑一次同一行。回 `COVERED` 代表那一輪已經提交，這段時間它掃過了，這輪安靜結束。回 `TAKE_OVER` 代表那一輪超過 20 分鐘沒寫進度，當成已經死了，這時回第 1 步重跑 `begin` 由這輪接手。`wait` 只讀不寫，幾輪同時等也不會互相干擾。接手時如果兩輪同時重跑 `begin`，其中一輪會再收到 `ROUND_ALREADY_RUNNING`，照樣再等。
+If it returns `STILL_RUNNING`, run the same line again. `COVERED` means that round has committed and scanned this period, so end this round quietly. `TAKE_OVER` means that round has written no progress for over 20 minutes and is treated as dead, so go back to step 1 and rerun `begin`, and this round takes over. `wait` only reads and never writes, so several rounds waiting at once do not interfere with each other. If two rounds rerun `begin` at the same time while taking over, one of them receives `ROUND_ALREADY_RUNNING` again and waits again in the same way.
 
-判斷依據是 `round-progress.json` 最後一次被寫入的時間，`begin` 與每一個 `step` 都會寫它，`commit` 會刪掉它。以前收到這個 status 是直接結束，結果第一輪要是中途死掉，整批補跑都白費，因為其他輪早就走了。同一輪不小心重跑了自己的 `begin` 也會收到這個 status，照樣改跑 `wait`，等自己的進度檔過期後接手，不會整輪作廢。代價是其他輪要等第一輪跑完才結束，第一輪死掉時最多要等 20 分鐘才有人接手。排程時段之間隔好幾個小時，所以會進到這條路的只有同時補跑的那幾輪，以及另一輪還在跑時手動按的「立即執行」。
+The decision is based on when `round-progress.json` was last written. `begin` and every `step` write it, and `commit` deletes it. Receiving this status used to mean ending at once, and as a result, if the first round died partway, the whole batch of catch-up runs was wasted, because the other rounds had already left. A round that accidentally reruns its own `begin` also receives this status. It likewise runs `wait` instead and takes over once its own progress file expires, so the round is not thrown away. The cost is that the other rounds cannot end until the first round finishes, and when the first round dies it takes up to 20 minutes before anyone takes over. Scheduled slots are several hours apart, so the only rounds that reach this path are the ones catching up at the same time, and a 「立即執行」 (Run now) pressed by hand while another round is still running.
 
 
 ### 1. begin
 
-**用 Bash 工具跑。**
+**Run it with the Bash tool.**
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py" begin
 ```
 
-回傳 JSON。**`status` 的意思與對應動作一律查開頭那張總表，這裡不重列。**
-每一步都只引用總表，因為在兩個地方各維護一份清單已經不同步過一次。
+It returns JSON. **For what each `status` means and what to do about it, always look it up in the master table at the start, which is not repeated here.** Every step refers only to the master table, because keeping a separate list in two places has already gone out of sync once.
 
-`PROCEED` 以外的 status 都在總表上，照總表做。`ABORT_STATE_CORRUPT` 這裡多補一句
-理由：腳本刻意不自己編一個水位，因為編一個較新的水位會把上次檢查之後的信全部靜默跳過。
+Every status other than `PROCEED` is in the master table, so follow the table. For `ABORT_STATE_CORRUPT` one more sentence of reasoning is added here. The script deliberately does not make up a watermark on its own, because making up a newer watermark would silently skip all mail since the last check.
 
-`PROCEED` 帶的欄位
+Fields that come with `PROCEED`
 
-| 欄位 | 用途 |
+| Field | Purpose |
 |---|---|
-| `notifiedIds` | 已通知過的 id，出現在這裡的信一律跳過 |
-| `notifyNow` | 上輪通知失敗的信，這輪要重推。使用者已勾選完成的不會出現在這裡 |
-| `judgeOverdue` | 等太久的待判信，處理方式見第 2 步 |
-| `judgeNow` | 還沒判定完的舊欠帳，這輪要全部判掉 |
-| `nextQuery` | 第一個要跑的查詢，含 `query`、`lo`、`hi`、`max_results` |
-| `coverageStalled` | **只有在故障時才會出現**，出現就是 `true`，處理方式見下面那一節 |
-| `stalledHours` | 跟上一個欄位同進同出，落後幾個小時，警報訊息要帶這個數字 |
+| `notifiedIds` | Ids already notified. Always skip any mail that appears here |
+| `notifyNow` | Mail whose notification failed last round, to be re-sent this round. Mail the user has already checked off as done does not appear here |
+| `judgeOverdue` | Mail awaiting judgement that has waited too long. See step 2 for how to handle it |
+| `judgeNow` | Older backlog not yet fully judged. All of it must be judged this round |
+| `nextQuery` | The first query to run, containing `query`, `lo`, `hi`, `max_results` |
+| `coverageStalled` | **Appears only on a fault**, and when it appears it is `true`. See the section below for how to handle it |
+| `stalledHours` | Present exactly when the previous field is. It is how many hours behind coverage is, and the alert message must include this number |
 
-`config` 是 `config.json` 的健康狀況，欄位 `status` / `names` / `calendarUrls` / `alert`。
-不用自己判斷檔案在不在，腳本已經看過了。
+`config` is the health of `config.json`, with fields `status` / `names` / `calendarUrls` / `alert`. You do not need to check yourself whether the file exists, because the script has already looked.
 
-`status` 為 `present` 時去讀 `Email_Check/config.json` 取 `names`，那是使用者本人的各種名字形式。
-路徑要照抄，不要只寫 `config.json`。工作目錄是 repo 根目錄而不是這個資料夾，
-裸檔名會解析到 `Daily_Task\config.json`，那裡沒有東西。
-`incomplete`（檔案在但 `names` 是空的）、`missing`（不存在）、`malformed`（JSON 壞掉）
-一律跳過身分辨識、其他照做，**不要中止**。辨識不出當事人是誰，只會讓
-「收件人不是使用者」那條早退規則失效，方向是多留信而不是漏信。
+When `status` is `present`, read `Email_Check/config.json` to get `names`, which are the various forms of the user's own name. Copy the path exactly, and do not write just `config.json`. The working directory is the repo root rather than this folder, so a bare file name resolves to `Daily_Task\config.json`, where nothing exists. For `incomplete` (the file exists but `names` is empty), `missing` (it does not exist) and `malformed` (the JSON is broken), always skip identity recognition and do everything else as usual, and **do not abort**. Being unable to recognize who the person is only disables the early-exit rule in Mail not addressed to the user, and the direction is keeping more mail rather than missing mail.
 
-`alert` 為 `true` 時，第 5 步的推播要多帶一段設定檔異常。它只在狀態由正常轉為異常、
-或由一種異常轉為另一種的那一輪才是 `true`，所以缺檔沒修也不會每一輪都推一則。
+When `alert` is `true`, the notification in step 5 must carry an extra section about the config file anomaly. It is `true` only in the round where the state turns from normal to abnormal, or from one kind of anomaly to another, so a missing file left unfixed does not send a notification every round.
 
-**推成功要在第 6 步回報 `configAlerted`。** 警示跟信件走同一套「預設保留」規矩，
-沒回報就當成還沒送到，下一輪會再推一次。漏填只會多收一則，不填卻推成功也不會
-出錯；反過來沒推成功卻填了，這個故障就會永久靜音到它變成另一種故障為止。
+**If the notification succeeds, report `configAlerted` in step 6.** Alerts follow the same 「預設保留」 (keep by default) rule as mail, so if it is not reported it is treated as not yet delivered and the next round sends it again. Leaving it out only costs one extra notification, and leaving it out after a successful send causes no error either. Conversely, filling it in when the send failed silences this fault permanently, until it turns into a different kind of fault.
 
-`calendarUrls` 為 0 時**不要呼叫 `calendar_check.py`**。空陣列是使用者刻意關掉日曆檢查的
-合法設定，不是故障，呼叫只會回 `UNCHECKED` 並白花一個 subprocess，
-活動直接照第 4 步當成不在日曆處理。
+When `calendarUrls` is 0, **do not call `calendar_check.py`**. An empty array is a valid setting in which the user deliberately turned off the calendar check, not a fault. Calling it would only return `UNCHECKED` and waste a subprocess. Handle events directly as not on the calendar, per step 4.
 
-`config.example.json` 是給人看的範本，執行時不要讀它。
+`config.example.json` is a template for people to read. Do not read it at runtime.
 
-#### 看到 `coverageStalled`，立刻送一則 toast，在做任何其他事情之前
+#### On `coverageStalled`, send a toast at once, before anything else
 
-**這兩個欄位平常不存在。** 正常的一輪回傳裡根本沒有它們，所以不用判斷數字大小也不用
-跟任何門檻比較，看到就是故障，沒看到就是正常。門檻的比較在腳本裡做完了。
+**These two fields normally do not exist.** A normal round's return does not contain them at all, so there is no need to judge the size of the number or compare it against any threshold. Seeing them means a fault, and not seeing them means normal. The threshold comparison has already been done in the script.
 
-用第 5 步那個確切的命令格式送，訊息照抄下面這一行，只把數字換成 `stalledHours` 的值。
+Send it with the exact command format from step 5. Copy the message from the line below verbatim, replacing only the number with the value of `stalledHours`.
 
 ```
 Gmail 檢查已經 <stalledHours> 小時沒有跑完任何一輪，信可能正在累積，需人工檢查
 ```
 
-**送完繼續正常執行這一輪，不要中止。** 前緣落後不代表這輪也會失敗，而且這輪跑完就是
-讓前緣追上的方式。
+**After sending it, continue this round normally, and do not abort.** A lagging front does not mean this round will fail too, and finishing this round is exactly how the front catches up.
 
-**這件事要排在最前面，理由是這輪也可能死在半路。** 卡住的那個環節不會通知任何人，
-所以警報必須在還沒碰到它之前就送出去。
+**This goes first because this round may also die partway.** The stage that is stuck notifies no one, so the alert must go out before the round reaches it.
 
-為什麼這個數字可信。覆蓋前緣追蹤的是「掃過哪些時間區間」而不是「何時看到信」，
-`step` 退休區間看的是查詢邊界不是找到幾封，所以空的區間跟滿的區間一樣會讓前緣前進。
-信箱安靜三天前緣照樣推到現在，前緣卡住就只有一個意思，就是有輪次沒跑完。
+Why this number can be trusted. The coverage front tracks "which time ranges have been scanned", not "when mail was seen". `step` retires a range based on the query bounds, not on how many messages were found, so an empty range advances the front just as a full one does. If the mailbox is quiet for three days the front still moves up to now, so a stuck front means only one thing, that some round did not finish.
 
-24 小時這個門檻大於兩個時段之間最長的正常間隔，也就是 22:20 到隔天 06:50 的 8 小時 30 分，
-所以正常情況不會叫。電腦關機兩天再開機會叫一次，那不是誤報，它確實兩天沒跑。
+The 24-hour threshold is longer than the longest normal gap between two slots, which is the 8 hours 30 minutes from 22:20 to 06:50 the next day, so it does not fire under normal conditions. A computer shut down for two days and then turned back on fires it once, and that is not a false alarm, since it really did not run for two days.
 
-**這道警報抓不到的情況。** 如果連 `begin` 本身都跑不起來，例如它撞上權限提示，
-那整輪不會開始，這段也不會被執行。它涵蓋的是「`begin` 成功但後面沒跑完」。
+**What this alert cannot catch.** If `begin` itself cannot run, for example because it hits a permission prompt, the whole round never starts and this section is never executed. What it covers is the case where `begin` succeeds but the rest does not finish.
 
-### 2. 先清償欠帳
+### 2. Settle the backlog first
 
-**`notifyNow`** 裡的信直接照第 5 步重推。重要性上輪已經確認過，不用重判。
+Re-send mail in **`notifyNow`** directly per step 5. Its importance was already confirmed last round, so do not judge it again.
 
-**`judgeOverdue`** 裡的信已經等超過兩輪。**不可以因為判不出來就丟掉。**
-- 疑似求職流程（recruiter、HR、ATS、公司網域）、高風險來源（學校、政府、銀行、
-  保險、房東）、或疑似真人個人往來的，**發「待確認」通知**，讓使用者自己去開信
-- 只有在確定是行銷或平台推播時才可以放掉
+Mail in **`judgeOverdue`** has already waited more than two rounds. **Never drop it because you cannot decide.**
+- For mail that looks like part of a job application process (recruiter, HR, ATS, company domain), comes from a high-risk source (school, government, bank, insurance, landlord), or looks like a personal exchange with a real person, **send a 「待確認」 (needs checking) notification** and let the user open the mail themselves
+- Drop it only when you are sure it is marketing or a platform push notification
 
-理由是排隊本身有代價。一天只有四個時段的時候，等兩輪就是十幾個小時，一封當天下午截止的 OA 排到那時候已經沒意義了。2026-09-28 起大約每小時真正跑一輪，等兩輪大約兩小時，白天就能升級成「待確認」，夜間 22:20 到 06:50 之間沒有輪次，所以最長仍會等到隔天早上。
+The reason is that queueing has a cost of its own. When there were only four slots a day, waiting two rounds meant more than ten hours, and an OA due that same afternoon was meaningless by the time its turn came. Since 2026-09-28 about one round actually runs per hour, so waiting two rounds takes about two hours and mail can be escalated to 「待確認」 during the day. There are no rounds at night between 22:20 and 06:50, so the longest wait still lasts until the next morning.
 
-**`judgeNow`** 這輪全部判掉。讀內文沒有次數上限，判不出來就讀。
+Judge everything in **`judgeNow`** this round. There is no limit on how many times you read a body, so if you cannot decide, read it.
 
-### 3. 搜尋迴圈
+### 3. Search loop
 
-拿 `nextQuery` 呼叫 `mcp__gmail__search_emails`，`account` 傳 `"scout"`，
-`query` 與 `max_results` 照腳本給的值傳，**不要自己改 query**。
+Call `mcp__gmail__search_emails` with `nextQuery`, passing `"scout"` as `account` and passing `query` and `max_results` exactly as the script gave them, and **do not change the query yourself**.
 
-`query` 尾端已經帶了一組 `-from:` 排除，來源是 `config.json` 的 `excludedSenders`。
-那些是使用者自己架的爬蟲與訂閱源，一天幾十封摘要，是這個信箱最大宗的噪音，
-沒有一封需要通知。**清單由腳本組進 query，你不用知道也不要自己加或減。**
-`config.json` 讀不到時那組排除會整組消失，方向是多抓信而不是少抓，所以只是多花 token。
+The end of `query` already carries a set of `-from:` exclusions, taken from `excludedSenders` in `config.json`. Those are crawlers and feeds the user set up personally, sending dozens of digests a day. They are the largest source of noise in this mailbox, and none of them needs a notification. **The script builds the list into the query, so you do not need to know it and must not add to it or remove from it yourself.** When `config.json` cannot be read, that whole set of exclusions disappears, and the direction is fetching more mail rather than less, so the only cost is extra tokens.
 
-`query` 也帶了一組 `-label:` 排除，來源是 `config.json` 的 `excludedLabels`，
-目前就是 `ignore` 這個標籤。它由使用者在 Gmail 那邊設的 filter 自動掛上，
-規則是使用者本人訂並確認過的，所以新信進來時就已經帶著標籤。
-**掛了標籤就代表使用者已經對這一類信下過決定，不要再提醒**，
-那封信連抓都不用抓。
+`query` also carries a set of `-label:` exclusions, taken from `excludedLabels` in `config.json`, which is currently just the `ignore` label. It is applied automatically by a filter the user set up in Gmail, under rules the user personally wrote and confirmed, so new mail already carries the label when it arrives. **A label means the user has already decided about this kind of mail, so do not remind them again**, and that mail does not even need to be fetched.
 
-決定是預先下在規則上的，不是逐封看過，所以**不要反推「沒有標籤就等於他還沒看過」**。
-沒標籤只代表那封信不屬於他排除掉的類別，判斷一律回到主標準。
+The decision was made in advance in the rule, not by looking at each message, so **do not infer the reverse, that no label means the user has not seen it**. No label only means that mail does not belong to a category the user excluded, and judgement always falls back to the main criterion.
 
-這比 `excludedSenders` 強，因為標籤可以只掛在某個寄件人的其中一封信上，
-而那個寄件人別的信照樣會進來。
+This is stronger than `excludedSenders`, because a label can be applied to just one message from a sender while that sender's other mail still comes in.
 
-**標籤只有使用者本人能掛，你不准掛也不准建議在 `excludedLabels` 裡加東西。**
-禁止事項那一節已經擋掉加標籤這個動作，這裡是同一條界線的另一面。
-判斷不重要是你的職權，宣告「以後都別再問我這個」是使用者的。
-看到一批重複的噪音信時正確的做法是照常判為不重要，然後在回報裡提一句，
-讓使用者自己決定要不要掛標籤。
+**Only the user can apply labels. You may not apply one, and you may not suggest adding anything to `excludedLabels`.** The Forbidden section already blocks the act of adding a label, and this is the other side of the same line. Judging something unimportant is within your authority, while declaring "never ask me about this again" belongs to the user. When you see a batch of repeated noise mail, the right thing is to judge it unimportant as usual and then mention it once in your report, so the user can decide whether to apply a label.
 
-**query 裡不會有、也不可以加 `in:inbox`。** 這個信箱有 filter 會把求職信自動分流出
-收件匣。實測同一個 6 小時窗口，加了只剩 2 封、不加是 24 封，被漏掉的正好是應徵回覆。
+**The query does not contain `in:inbox`, and you must not add it.** This mailbox has a filter that automatically routes job-search mail out of the inbox. In a measurement over the same 6-hour window, adding it left only 2 messages while leaving it out gave 24, and the ones missed were exactly the replies to applications.
 
-拿到結果後，先照第 4 步判斷這一批，**把這批的 `important`、`todos` 與 `defer` 寫進
-`round.json`**（格式見第 6 步，記得帶上 `begin` 給你的 `roundToken`），然後用 Bash 工具回報
+Once you have the results, first judge this batch per step 4, **write this batch's `important`, `todos` and `defer` into `round.json`** (format in step 6, and remember to include the `roundToken` that `begin` gave you), then report with the Bash tool.
 
 ```
 ... statemachine.py step --lo <lo> --hi <hi> --count <這批回傳的封數>
 ```
 
-搜尋報錯或逾時就重試一次，仍然失敗改成回報 `... statemachine.py step --failed`。
+If the search errors or times out, retry once. If it still fails, report `... statemachine.py step --failed` instead.
 
-`step` 的 `status` 一律查開頭那張總表，**這裡同樣不重列**，理由同第 1 步。
-表上子命令欄含 step 的每一種它都可能回。
+Always look up the `status` from `step` in the master table at the start, and **it is likewise not repeated here**, for the same reason as in step 1. It may return any status whose subcommand column in the table includes step.
 
-`stuck` 不是空的時候，代表有超過 40 封信擠在同一秒、無法再二分。
-推播要寫「舊信追趕卡住 需人工處理」，因為那不會自己好。
+When `stuck` is not empty, it means more than 40 messages are packed into the same second and cannot be bisected any further. The notification must say 「舊信追趕卡住 需人工處理」, because that will not resolve itself.
 
-### 4. 判斷哪些重要
-主判斷標準只有一個，就是下面的可行動性測試。另外有一個獨立的例外類別。
+### 4. Decide what is important
+There is only one main criterion, the actionability test below. Separately there is one independent exception category.
 
-**主標準，有下一步動作要使用者做**
-判斷標準採 GTD 的可行動性測試。下面兩個條件要同時成立。
+**Main criterion, there is a next action for the user to take**
+The criterion is the GTD actionability test. Both conditions below must hold at the same time.
 
-> 1. 這封信存在一個具體的下一步動作
-> 2. 那個動作是要使用者去做的，而不是廣播給一大群人的招攬
+> 1. The mail has a concrete next action
+> 2. That action is for the user to take, not a solicitation broadcast to a large crowd
 
-兩個都成立才算。第二個條件是用來排除群發招攬的，行銷信也有下一步動作，
-但那是廣播出去的，不是在等使用者本人回應。
+It counts only when both hold. The second condition exists to exclude mass solicitations. Marketing mail also has a next action, but it is broadcast and is not waiting for the user personally to respond.
 
-**沒有寫出收件人名字時，預設就是要使用者做。**
-很多正當的信根本不會提到名字。銀行寫「請驗證您的帳戶」、recruiter 寫
-「你週四方便嗎」、房東寫「記得月底前繳」，都沒有點名卻確實是在等使用者處理。
-信寄到了這個信箱，預設收件對象就是使用者。
+**When no recipient name is written, the default is that it is for the user to do.**
+Many legitimate mails never mention a name at all. A bank writing "please verify your account", a recruiter writing "are you free Thursday", a landlord writing "remember to pay before the end of the month" name nobody, yet each really is waiting for the user to handle it. When a mail arrives in this mailbox, the default recipient is the user.
 
-要判定「這不是要使用者做的」需要正面證據，舉證責任在排除那一邊。可用的證據例如
-- 帶 List-Unsubscribe 標頭的群發行銷
-- 明顯是寫給一大群人看的商業宣傳
-- 轉寄進來的第三方信件，真正的當事人是別人
-- 內容裡的動作對任何收件人都成立，不是針對這個帳號或這個人的處境
+Ruling that "this is not for the user to do" requires positive evidence, and the burden of proof lies on the excluding side. Examples of usable evidence.
+- Mass marketing carrying a List-Unsubscribe header
+- Commercial promotion clearly written for a large audience
+- A forwarded third-party mail whose real party is someone else
+- An action in the content that holds for any recipient, not one specific to this account or this person's situation
 
-找不到這種證據時就當成要使用者做，不要因為**沒寫**名字就判定不可行動。
-但**寫了別人的名字**是另一回事，那是正面證據，見下面「收件人不是使用者的信」。
+When no such evidence is found, treat it as for the user to do. Do not rule it non-actionable because a name was **not written**. But **someone else's name being written** is a different matter. That is positive evidence, see the Mail not addressed to the user section below.
 
-**群發本身不能證明「這件事跟使用者無關」。**
-針對使用者所屬群體的必辦事項也算有下一步動作。例如學校要求所有國際學生限期完成報到，
-那是群發，但使用者必須辦。
+**Mass sending by itself does not prove "this has nothing to do with the user".**
+A mandatory task aimed at a group the user belongs to also counts as a next action. For example, when the school requires all international students to complete check-in by a deadline, that is mass mail, but the user must do it.
 
-所以下列來源即使長得像電子報或群發，**也不可以只憑形式就早退**，
-要先確認裡面沒有必辦事項才能放掉。snippet 看不完就讀內文
-- 學校（Northeastern 各單位、OGS、Student Services）
-- 政府與公家機關（稅務、大使館、各級主管機關）
-- 銀行、保險、房東、學貸
-- **使用者已加入或已報名的組織寄給成員的信。** 志工團隊、社團、活動主辦方、
-  課程營隊。判準是使用者先答應過加入或參加，所以組織對成員的通知是履行承諾的
-  一環，不是招攬。實例是 Taiwan Next 志工組的行前通知
+So the following sources, even when they look like a newsletter or mass mail, **must not be dropped early on form alone**. First confirm they contain no mandatory task before letting them go. If the snippet does not show everything, read the body.
+- School (Northeastern units, OGS, Student Services)
+- Government and public agencies (tax, embassies, competent authorities at every level)
+- Banks, insurance, landlords, student loans
+- **Mail that an organization the user has joined or registered with sends to its members.** Volunteer teams, clubs, event organizers, course camps. The test is that the user agreed earlier to join or take part, so the organization's notice to its members is part of fulfilling a commitment, not a solicitation. A real case is the pre-event notice from the Taiwan Next volunteer group
 
-反過來，純商業行銷的群發（購物、優惠、產品發表、第三方 career fair 招攬）
-可以直接憑形式排除，不用讀內文。
-**但雇主自己辦的招募活動邀約不在這一組**，那個是待辦，
-見上面「算有下一步動作的例子」。
+Conversely, mass mail that is pure commercial marketing (shopping, deals, product launches, third-party career fair solicitations) can be excluded directly on form, without reading the body. **But a recruiting event invitation run by the employer itself is not in this group**. That one is a todo, see "Examples that count as a next action" below.
 
-**已加入的組織與純招攬的分界在「使用者答應過沒有」，不在信的形狀。**
-同一個網域可能兩種都寄。實例是 `taiwannext.org`，`contact@` 那條 Mailchimp 名單
-發的是對外招攬（帶 List-Unsubscribe，可憑形式排除），而 `volunteer@` 發給
-已登記志工的行前通知是必辦事項。**不要因為之前排除過同網域的某封信就連帶排除。**
+**The line between an organization the user joined and a pure solicitation is whether the user agreed, not the shape of the mail.**
+One domain may send both. A real case is `taiwannext.org`. The Mailchimp list on `contact@` sends outward solicitations (carrying List-Unsubscribe, excludable on form), while the pre-event notices that `volunteer@` sends to registered volunteers are mandatory tasks. **Do not exclude a mail just because an earlier mail from the same domain was excluded.**
 
-#### 收件人不是使用者的信
+#### Mail not addressed to the user
 
-`config.json` 的 `names` 在這裡的用途只有一個，就是抓出**當事人不是使用者**的信。
-`scout` 這個帳號是轉寄匯集點，會收到寄錯人的信與轉寄進來的第三方信件。
+`names` in `config.json` has exactly one use here, which is catching mail whose **real party is not the user**. The `scout` account is a forwarding hub, so it receives misaddressed mail and forwarded third-party mail.
 
-**信裡的稱呼寫的是別人的名字時，那件事就不是要使用者做的。這是決定性的，不是參考。**
+**When the salutation in a mail is someone else's name, the matter is not for the user to do. This is decisive, not advisory.**
 
-做法
-- 把開頭稱呼（`Hi X`、`Dear X`、`X 您好`）裡的名字跟 `config.json` 的 `names` 比對。
-  比對要寬鬆，只有名、只有姓、羅馬拼音的不同寫法、漢字與拼音互換，全部算命中
-- 命中，或看不出稱呼 -> 照常判斷
-- 稱呼是一個**明顯不同的人** -> **不算重要，不進 `todos`，不推播**，
-  把 id 放進 `judgedIds` 結案
+How to apply it.
+- Compare the name in the opening salutation (`Hi X`, `Dear X`, `X 您好`) against `names` in `config.json`. Match loosely, so first name only, surname only, different romanized spellings, and Chinese characters swapped with pinyin all count as a hit
+- A hit, or no discernible salutation -> judge as usual
+- The salutation is **a clearly different person** -> **not important, not into `todos`, no push**, put the id in `judgedIds` to close it
 
-**群體稱呼不是別人的名字，不構成排除證據。** `Dear Taiwan Next Volunteers`、
-`各位同學`、`Dear Students` 指的是一個使用者身在其中的群體，所以使用者就是收件對象。
-這一條只在稱呼是**某個具體的、不是使用者的人**時才啟動。看到群體稱呼要回去走主標準，
-而且要套用上面「群發本身不能證明跟使用者無關」那一段。
+**A group salutation is not someone else's name and is not exclusion evidence.** `Dear Taiwan Next Volunteers`, `各位同學`, `Dear Students` refer to a group the user is part of, so the user is a recipient. This rule fires only when the salutation is **a specific person who is not the user**. On a group salutation, go back to the main criterion and apply the paragraph above saying that mass sending by itself does not prove it has nothing to do with the user.
 
-另一個實例。使用者收過一封 Tesla 的來信，內容是「你已報名的 Supercharging Your
-Resume Workshop 今天 16:30 舉行」。那**是**待辦，因為出席是動作、時間是硬期限。
-不要因為它讀起來像提醒或像活動宣傳就排除，判斷依據是它給了一個要使用者出現的
-具體時間，而使用者已經答應過。
+Another real case. The user once received a mail from Tesla whose content was 「你已報名的 Supercharging Your Resume Workshop 今天 16:30 舉行」. That **is** a todo, because attending is an action and the time is a hard deadline. Do not exclude it because it reads like a reminder or like event promotion. The basis for the ruling is that it gives a concrete time at which the user must show up, and the user already agreed.
 
-實例。使用者收過一封主旨「煩請補交 Facebook 個人帳號連結」的志工組來信，
-開頭寫 `Hi Hsiao Ming`。那不是使用者的任何名字形式，所以那是寄給別人的信。
-當時的判斷把它升級成「待確認」待辦，**那是錯的**。
+A real case. The user once received a mail from the volunteer group with the subject 「煩請補交 Facebook 個人帳號連結」, opening with `Hi Hsiao Ming`. That is not any form of the user's name, so it was a mail for someone else. The ruling at the time upgraded it to a 「待確認」 (to be confirmed) todo, and **that was wrong**.
 
-**不要用 `uncertain` 或「待確認」來處理這種情況。**
-`uncertain` 是給「確定是要使用者辦、但細節看不完」的信。
-「不確定這封是不是給使用者的」不屬於它的用途。稱呼是別人就是別人，直接結案，
-不要丟一筆使用者永遠不該勾、也不知道為什麼會在那裡的項目給他。
+**Do not handle this case with `uncertain` or 「待確認」.**
+`uncertain` is for mail that is certainly for the user to handle but whose details cannot be fully seen. "Unsure whether this mail is for the user" is not its use. If the salutation is someone else, it is someone else, so close it directly. Do not hand the user an item he should never tick and would not know why it is there.
 
-反過來不成立。**信裡沒有出現使用者的名字，不代表那封信不是給使用者的。**
-沒寫名字時預設仍然是要使用者做，只有寫了**別人**的名字才是排除證據。
+The reverse does not hold. **The user's name not appearing in a mail does not mean the mail is not for the user.** With no name written, the default is still that it is for the user to do. Only a written name of **someone else** is exclusion evidence.
 
-**不要把「信裡有寫使用者的名字」當成重要性訊號。** 行銷信一樣會做個人化，
-這個信箱裡就有實例，Handshake 的職缺推播主旨直接用了使用者的名字。
-名字只用來辨識收件對象，判斷重要性一律回到上面那兩個條件。
+**Do not treat "the mail contains the user's name" as an importance signal.** Marketing mail personalizes too, and this mailbox has a real case, a Handshake job push whose subject used the user's name directly. The name only identifies the recipient. Importance is always judged by going back to the two conditions above.
 
-算有下一步動作的例子
-- recruiter 或 HR 真人來信，詢問意願、要求排時間或選時段、或在等回覆
-- 面試邀約與改期
-- OA、線上測驗、作業或面試連結，例如 HackerRank、CodeSignal
-- offer，使用者要決定接或不接
-- referral 回覆，對方在等使用者提供資料或確認
-- 學校、政府、銀行、房東、保險、稅務要求提交、上傳、簽署、驗證、補件或付款
-- 真人提了問題在等回覆
-- 帳號安全事件裡真的要動手的那種。例如帳號被鎖、要驗證才能恢復存取、
-  使用者沒發起過的密碼重設、服務端強制要求立即改密碼、付款方式被停用。
-  某個設定已經被改掉而使用者沒做過也算，例如密碼已變更、加了轉寄規則、
-  換了救援聯絡人，那代表帳號可能已經失守，要通知。
-  **但一次性驗證碼不算**，見下面不算有下一步動作的那一條
-- **信箱或帳號的驗證連結。** 點下去才完成註冊或啟用的那種，例如求職系統要求驗證
-  候選人帳號。連結放在信裡等著被點，不點就一直沒完成，所以那是還沒做的事。
-  **信裡給的是一次性驗證碼時不算**，分界見下面那一條
-- **要繳的帳單。** 信用卡帳單、水電費、學費、保費、稅單、貸款。
-  **即使信裡沒有寫金額或期限也算**，那種信的下一步動作就是登入去查並繳款
-- **對帳單與月結單。** 使用者會去核對帳務是否正常，所以下一步動作是「去查一遍」。
-  不要因為對帳單讀起來像紀錄就排除 —— 帳單的動作是繳款，對帳單的動作是核對，
-  兩者都是還沒做的事。真正不算的是**單筆交易收據**，那個看完就沒事了
-- **已報名或已答應的活動，只要有具體日期時間。** 例如已報名的工作坊、說明會、
-  面試練習、系上必到活動。**但這一類要先查日曆**，見下面「活動要先查日曆」。
-  時間要寫進 `action`，例如「今天 16:30 出席 Tesla 履歷工作坊」，
-  因為 `deadline` 只到日期，同日活動光看日期看不出剩幾小時。
+Examples that count as a next action.
+- Mail from a real recruiter or HR person asking about interest, asking to schedule or pick a time slot, or waiting for a reply
+- Interview invitations and reschedules
+- OA, online assessments, assignment or interview links, for example HackerRank, CodeSignal
+- An offer the user must decide to accept or decline
+- A referral reply where the other side is waiting for the user to provide material or confirm
+- A school, government, bank, landlord, insurer or tax authority asking to submit, upload, sign, verify, supply missing documents, or pay
+- A real person asked a question and is waiting for a reply
+- The kind of account security event that really needs hands-on action. For example the account is locked, verification is needed to regain access, a password reset the user never started, the service forcing an immediate password change, a payment method disabled. It also counts when some setting has already been changed and the user did not do it, for example the password was changed, a forwarding rule was added, a recovery contact was replaced. That means the account may already be compromised, so notify. **But a one-time verification code does not count**, see that entry under the examples that do not count as a next action below
+- **A verification link for a mailbox or account.** The kind you click to complete registration or activation, for example a job application system asking to verify the candidate account. The link sits in the mail waiting to be clicked, and until it is clicked the thing stays incomplete, so it is something not yet done. **When the mail gives a one-time verification code it does not count**, the boundary is in that entry below
+- **Bills to pay.** Credit card bills, utilities, tuition, premiums, tax bills, loans. **It counts even when the mail states no amount or deadline**. The next action for that kind of mail is to log in, look it up and pay
+- **Account statements and monthly statements.** The user will check whether the account is in order, so the next action is "go check it once". Do not exclude a statement because it reads like a record. A bill's action is paying and a statement's action is checking, and both are things not yet done. What truly does not count is a **single-transaction receipt**, which is finished once read
+- **Events already registered for or agreed to, as long as they have a concrete date and time.** For example a registered workshop, info session, mock interview, or a mandatory department event. **But this category must check the calendar first**, see the Check the calendar for events first section below. Write the time into `action`, for example 「今天 16:30 出席 Tesla 履歷工作坊」, because `deadline` holds only a date, and for a same-day event the date alone does not show how many hours are left.
 
-  **主旨或內文出現「行前通知」「行前提醒」「注意事項」「See you at」時，
-  那個詞本身就宣告了使用者已經答應要去。** 寄這種信的前提是收件人在名單上。
-  不要把它讀成活動宣傳，宣傳是招人來，行前通知是對已經答應的人交代細節。
+  **When the subject or body contains 「行前通知」「行前提醒」「注意事項」「See you at」, that word itself declares that the user already agreed to go.** Sending such a mail presupposes the recipient is on the list. Do not read it as event promotion. Promotion recruits people to come, while a pre-event notice gives details to people who already agreed.
 
-  **這類信常常在時間地點下面再夾一個動作，例如填報名表、登記票券、繳費、
-  回覆出席。** snippet 的長度剛好只夠放日期時間地點，動作被截在後面看不到，
-  所以 snippet 顯示「活動時間地點」不等於「這封信只有時間地點」。
-  判成已報名活動之後要讀內文把夾帶的動作撈出來，見下面「什麼時候該讀內文」
-- **雇主自己辦的招募活動邀約，即使還沒報名過也算。** 公司自己的 info session、
-  recruiting kick-off、校園徵才場次、實習說明會，只要給出具體場次時間就算。
-  這是「已報名或已答應的活動」的例外，那一條要求使用者先答應過，這一條不要求，
-  開頭寫 `Hi there` 沒有指名也不影響。動作是「決定要不要報名並去報名」，
-  `deadline` 填活動當天，有多場就填最近一場還報得到的。
+  **Such mail often tucks another action under the time and place, for example filling in a registration form, registering a ticket, paying a fee, or replying with attendance.** The snippet is just long enough to hold the date, time and place, and the action is cut off after it out of view, so a snippet showing "event time and place" does not mean "this mail has only the time and place". After ruling it a registered event, read the body to pull out the tucked-in action, see the When to read the body section below
+- **A recruiting event invitation run by the employer itself counts even if not yet registered for.** The company's own info session, recruiting kick-off, campus recruiting session or internship info session counts as long as it gives a concrete session time. This is an exception to "Events already registered for or agreed to". That entry requires the user to have agreed first, this one does not, and an opening of `Hi there` naming no one makes no difference. The action is "decide whether to register, and register". `deadline` is the event day, and when there are several sessions use the nearest one still open for registration.
 
-  **分界在誰辦的，不在信的形狀。** 雇主自己辦的算，第三方 career fair 主辦方
-  與平台招攬的不算，後者留在忽略清單裡。透過 Handshake、LinkedIn 這類平台
-  轉送的雇主來信仍然算雇主辦的，平台只是投遞管道。
+  **The line is who runs it, not the shape of the mail.** Employer-run counts. Third-party career fair organizers and platform solicitations do not, and those stay in the Ignore list. Employer mail relayed through a platform such as Handshake or LinkedIn still counts as employer-run, since the platform is only the delivery channel.
 
-  **這類一樣要先查日曆。** `FOUND` 代表這場已經排進行程了，通常也就代表使用者
-  自己報過名了，所以「去報名」跟「出席」這兩筆都不用建。
-  **但那是一個推論，消不掉信裡白紙黑字要求的動作。**
-  分界是這樣：信裡只給了場次時間、報名連結這種「想來就自己去登記」的內容時，
-  `FOUND` 把整封信結案；信裡另外**明確要求**填表、繳費、補件、回覆出席人數時，
-  那幾筆照樣要落地，`action` 寫那個動作本身。細節跟下面「活動要先查日曆」
-  那一節完全一樣，那邊也講了同一封信的多個動作要合併成一筆。
-  `NOT_FOUND` 與 `UNCHECKED` 照樣建待辦。
-- 有截止日的事項。**不要要求「逾期會有實質損失」**，錯過一個已排定的機會
-  一樣算，理由跟不用急迫性當門檻一樣，只看下跌會漏掉影響最大的那些信
+  **This category likewise must check the calendar first.** `FOUND` means this session is already on the schedule, which usually also means the user registered for it, so neither the "register" todo nor the "attend" todo needs creating. **But that is an inference, and it cannot cancel an action the mail requires in black and white.** The line is as follows. When the mail gives only session times, a registration link, or other "sign up yourself if you want to come" content, `FOUND` closes the whole mail. When the mail additionally **explicitly requires** filling in a form, paying, supplying documents, or replying with the attendee count, those entries still must be created, with `action` stating that action itself. The details are exactly as in the Check the calendar for events first section below, which also says that multiple actions from one mail are merged into one entry. `NOT_FOUND` and `UNCHECKED` still create a todo.
+- Items with a deadline. **Do not require that "missing it causes real loss"**. Missing a scheduled opportunity counts too, for the same reason urgency is not used as a threshold. Looking only at the downside would miss the mails with the greatest impact
 
-不算有下一步動作的例子
-- **收件人稱呼是別人的名字。** 寄錯人或轉寄進來的第三方信件，那件事是別人要辦的。
-  詳見下面「收件人不是使用者的信」
-- **拒信。** 使用者明確說過拒信不重要，因為使用者不用做任何動作，也改變不了結果。
-  純資訊性的壞消息不通知
-- 帳號安全通知裡純告知的那種，量很大而且看完就沒事了。包含通知有新裝置登入、
-  通知從某個地點登入、登入位置異常提醒、以及只是要使用者確認「這是你嗎」
-  而答案就是「是」的信。這類地理位置警示會一直來，一律不通知
-- **一次性驗證碼。** 信裡給的是一串要複製到別的畫面的數字或字母，登入驗證碼、
-  兩步驟驗證碼、OTP 都算。使用者當下就處理掉了，所以排程看到它的時候那件事
-  早就結束，一律當成已處理，**不重要、不進待辦、不推播**，id 放進 `judgedIds` 結案。
-  碼通常幾分鐘就過期，而排程最長要等 8 小時 15 分才掃到，留待辦只是留一組死碼。
+Examples that do not count as a next action.
+- **The salutation is someone else's name.** Misaddressed mail or a forwarded third-party mail, where the matter is someone else's to handle. Details in the Mail not addressed to the user section above
+- **Rejections.** The user said explicitly that rejections are not important, because the user does not need to take any action and cannot change the outcome. Purely informational bad news is not notified
+- The purely informational kind of account security notice, which comes in large volume and is finished once read. This includes notices of a new device sign-in, notices of a sign-in from some location, unusual sign-in location alerts, and mail that only asks the user to confirm "was this you" when the answer is "yes". These geolocation alerts keep coming and are never notified
+- **One-time verification codes.** The mail gives a string of digits or letters to copy into another screen, and sign-in codes, two-step verification codes and OTPs all count. The user dealt with it on the spot, so by the time the scheduled run sees it the matter is long over. Always treat it as handled, **not important, not a todo, no push**, put the id in `judgedIds` to close it. A code usually expires within minutes, while the scheduled run can take as long as 8 hours 15 minutes to scan it, so keeping a todo only keeps a dead code.
 
-  **分界在信裡給的是碼還是連結**，不在主旨有沒有寫 verify。連結是還沒做的事，
-  碼是已經做完的事留下的殘影。**兩種都給的時候當成連結**，照樣建待辦，
-  方向是多一筆讓使用者勾掉而不是漏掉。
+  **The line is whether the mail gives a code or a link**, not whether the subject says verify. A link is something not yet done, and a code is the residue of something already done. **When both are given, treat it as a link** and create a todo as usual, erring toward one extra item for the user to tick off rather than a miss.
 
-  **帳號真的被動過還是要通知**，例如密碼已變更、加了轉寄規則、換了救援聯絡人。
-  那種信講的是已經發生的變更，不是一組等著被輸入的碼，走上面那條帳號安全規則。
-- 行銷 CTA，例如立即購買、限時優惠、快來報名、看更多職缺
-- 純商業性的電子報、產品宣傳、第三方 career fair 招攬。
-  **雇主自己辦的招募活動邀約不算這一類**，那是待辦
-- **平台發出的檔案分享與權限通知。** 「某人分享了檔案給你」「你現在可以檢視或
-  編輯這個檔案」這類信的內容就只是**告知你多了一個權限**，沒有任何要辦的事。
-  Canva、Google Drive、Notion、Figma 都會發。**不算重要，不進待辦，也不要通知。**
+  **A real change to the account still gets notified**, for example the password was changed, a forwarding rule was added, a recovery contact was replaced. Such a mail reports a change that already happened, not a code waiting to be entered, so it follows the account security rule above.
+- Marketing CTAs, for example buy now, limited-time offer, sign up now, see more jobs
+- Purely commercial newsletters, product promotion, third-party career fair solicitations. **A recruiting event invitation run by the employer itself is not in this category**, it is a todo
+- **File-sharing and permission notices sent by a platform.** Mail such as "someone shared a file with you" or "you can now view or edit this file" only **tells you that you gained a permission**, with nothing to do. Canva, Google Drive, Notion and Figma all send them. **Not important, not a todo, and do not notify either.**
 
-  **判斷寄件人要看實際地址，不要看顯示名稱。** 平台會把分享者的名字放進顯示名稱，
-  所以它長得像真人寄的。實測案例的形狀是 `<某個人名> (Canva) <no-reply@canva.com>` ——
-  顯示名稱有人名，地址是 `no-reply@`，那就是平台發的，不是真人往來信件。
-  凡是 `no-reply@` / `noreply@` / `donotreply@` 或平台網域，一律當成自動信。
+  **Judge the sender by the actual address, not the display name.** Platforms put the sharer's name in the display name, so it looks as if a real person sent it. A measured case had the shape `<某個人名> (Canva) <no-reply@canva.com>`. The display name has a person's name and the address is `no-reply@`, so it was sent by the platform and is not correspondence with a real person. Anything from `no-reply@` / `noreply@` / `donotreply@` or a platform domain is always treated as automated mail.
 
-  **真人從自己的信箱寄來的分享通知是另一回事。** 那是可以回信的真實地址，
-  屬於「真人寄來的個人往來信件」那個獨立例外，算重要要通知（但沒有可完成的
-  動作，所以不進待辦）。除外情形是信裡另外要求你在期限內完成某件事，
-  那時依那件事判斷，不是依分享本身
-- 純資訊性通知、單筆交易收據、已完成的交易紀錄。
-  **這裡指的是「事情已經做完」的紀錄。要繳的帳單不屬於這類**，見上面「要繳的帳單」
-- 報名成功確認**本身**。但**已報名活動的行前提醒不屬於這類**，
-  那是在提醒一個有時間的承諾，見上面「已報名或已答應的活動」。
-  分界是「這封信有沒有給出一個要你出現或動手的具體時間」
-- 只說已收到你的應徵而沒有下一步的自動回覆
-- **意見回饋表單。** 請使用者對一場活動、一門課或一次服務給意見的表單，例如活動結束後的
-  滿意度調查、「請花五分鐘填問卷」這類信。**不重要、不進待辦、不推播**，id 放進 `judgedIds` 結案。
-  即使寄件人是學校或使用者參加過的活動主辦方也一樣，這一類是上面那些必讀來源的例外。
+  **A sharing notice a real person sends from their own mailbox is a different matter.** That is a real address you can reply to, and it falls under the independent exception for "personal correspondence from a real person", so it counts as important and is notified (but it has no action to complete, so it does not become a todo). The exclusion is when the mail additionally asks you to finish something by a deadline, and then judge by that thing, not by the sharing itself
+- Purely informational notices, single-transaction receipts, records of completed transactions. **This means records of "the thing is already done". A bill to pay is not in this category**, see "Bills to pay" above
+- The registration confirmation **itself**. But **a pre-event reminder for a registered event is not in this category**, because it reminds of a commitment with a time, see "Events already registered for or agreed to" above. The line is whether this mail gives a concrete time at which you must show up or act
+- Auto-replies that only say your application was received, with no next step
+- **Feedback forms.** A form asking the user for feedback on an event, a course or a service, for example a satisfaction survey after an event, or mail like "please take five minutes to fill out the survey". **Not important, not a todo, no push**, put the id in `judgedIds` to close it. This holds even when the sender is the school or the organizer of an event the user attended. This category is an exception to the must-read sources above.
 
-  **這個例外只涵蓋意見回饋表單，其他任何表單都照樣是待辦。** 報名表、補件、出席回覆、
-  資料登記、Co-Op 申報這些都不在例外裡，志工訓練報名表那一例就是。不要從這一條推論出
-  「填不填沒差的表單都可以放掉」，判準是表單的用途是不是收集意見，不是你估計它有沒有後果。
-  同一封信除了意見回饋表單之外另有必辦事項時，依那件事判斷，`action` 不要寫問卷
+  **This exception covers only feedback forms, and every other form is still a todo.** Registration forms, supplying documents, attendance replies, information registration and Co-Op reporting are all outside the exception, and the volunteer training registration form case is one of them. Do not infer from this entry that "a form where filling it in or not makes no difference can be dropped". The test is whether the form's purpose is collecting feedback, not your estimate of whether it has consequences. When the same mail has a mandatory task besides the feedback form, judge by that task, and do not write the survey into `action`
 
-**不要用急不急來決定要不要通知。**
-沒有截止日、下週才要辦、甚至完全沒有時間壓力的信，只要有要使用者做的下一步動作，
-就一樣要通知。使用者明確要求過這一點，理由是拿急迫性當門檻會讓使用者永遠收不到
-「重要但不緊急」的信，而那類信往往才是影響最大的，例如陌生 recruiter 的第一次接觸。
-截止日是通知內文要帶的資訊，不是要不要通知的門檻。
+**Do not use urgency to decide whether to notify.**
+Mail with no deadline, due next week, or under no time pressure at all must still be notified, as long as it has a next action for the user. The user explicitly asked for this, because using urgency as a threshold would mean the user never receives "important but not urgent" mail, and that kind is often the most consequential, for example a first contact from an unknown recruiter. The deadline is information the notification text carries, not a threshold for whether to notify.
 
-**獨立例外，真人寄來的個人往來信件**
-這一類即使沒有下一步動作也算重要。只要不是自動化、不是行銷、不是群發，
-不分主題都算。這是唯一不必通過可行動性測試的類別。
+**Independent exception, personal correspondence from a real person**
+This category counts as important even without a next action. As long as it is not automated, not marketing and not mass mail, it counts regardless of topic. This is the only category that does not have to pass the actionability test.
 
-不要把這個例外擴大解釋。機構或公司寄來的個別化自動信不算真人往來信件，
-那種要回去走可行動性測試。
+Do not stretch this exception. Individualized automated mail from an institution or company is not personal correspondence from a real person, and that kind goes back through the actionability test.
 
-**拒信的排除優先於這個例外。** 面試官親筆寫的拒信仍然不通知，
-因為使用者要的是「不用做動作就不要吵我」，不是「真人寫的就要吵我」。
-但如果那封信除了拒絕之外還邀請投別的職缺、或要求回覆，那就有下一步動作，照主標準通知。
+**The rejection exclusion takes precedence over this exception.** A rejection written personally by an interviewer is still not notified, because what the user wants is "don't bother me when no action is needed", not "bother me whenever a real person wrote it". But if that mail, besides rejecting, invites applying to another role or asks for a reply, it has a next action and is notified under the main criterion.
 
-**與忽略清單衝突時，以可行動性測試為準。**
+**When this conflicts with the Ignore list, the actionability test wins.**
 
-#### 活動要先查日曆
+#### Check the calendar for events first
 
-使用者的日曆才是他的行程系統。已經在日曆上的活動不需要待辦，重複列只是噪音。
-**待辦要抓的是缺漏**，也就是報名了卻沒進日曆的活動。
+The user's calendar is his scheduling system. An event already on the calendar needs no todo, and listing it again is just noise. **Todos exist to catch the gaps**, meaning events registered for but not on the calendar.
 
-判定為「已報名或已答應的活動」時，先用 Bash 工具跑
+When a mail is ruled "an event already registered for or agreed to", first run this with the Bash tool.
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_check.py" --summary "<信件主旨>" --date <YYYY-MM-DD>
 ```
 
-`--date` 填活動當天，不是收信日。回傳的 `status` 只有三種。
+`--date` is the event day, not the day the mail arrived. The returned `status` has only three values.
 
-| status | 意義 | 你要做的 |
+| status | Meaning | What you do |
 |---|---|---|
-| `FOUND` | 日曆上有對應事件 | **出席那一項不建待辦。** 信裡沒有別的動作就把 id 放進 `judgedIds` 結案 |
-| `NOT_FOUND` | 所有日曆都查過，沒有 | 建待辦，`action` 寫「把 X 加進日曆」加上時間 |
-| `UNCHECKED` | 查不準，`reason` 會說是哪一種，見下面 | 建待辦，並在 `action` 末端加「日曆未確認」 |
+| `FOUND` | A matching event is on the calendar | **No todo for attending.** If the mail has no other action, put the id in `judgedIds` to close it |
+| `NOT_FOUND` | All calendars were checked and none has it | Create a todo, with `action` saying 「把 X 加進日曆」 plus the time |
+| `UNCHECKED` | Could not check reliably, `reason` says which kind, see below | Create a todo and append 「日曆未確認」 to the end of `action` |
 
-`UNCHECKED` 有四種成因，處理方式全部一樣，`reason` 只是給人看的
+`UNCHECKED` has four causes, all handled the same way, and `reason` is only for humans to read.
 
-- 沒設定網址
-- 有日曆抓取失敗
-- **`--date` 解不出來。** 例如 `2026-02-31` 這種不存在的日期。
-  腳本刻意不退回「只比標題」，因為那樣會用九月的同名活動消掉你要建的待辦。
-  看到這個就回頭檢查你算的活動日期
-- **只在過期快取裡找到。** 配對到的事件全部來自抓取失敗後端出來的舊資料。
-  **不需要所有 feed 都掛掉**，只要活著的那些裡面沒有一個配得上就會是這個結果。
-  舊資料只證明活動曾經存在過，不證明現在還在，所以不算 `FOUND`。
-  反過來，只要有任何一個活著的 feed 配上了就是 `FOUND`，因為存在只需要一個來源
+- No URL configured
+- A calendar fetch failed
+- **`--date` cannot be parsed.** For example a nonexistent date such as `2026-02-31`. The script deliberately does not fall back to matching on title alone, because that would let a same-named event in September cancel the todo you need to create. When you see this, go back and check the event date you computed
+- **Found only in a stale cache.** Every matched event comes from old data served after a fetch failure. **Not every feed has to be down.** As long as none of the live ones match, this is the result. Old data only proves the event once existed, not that it still does, so it does not count as `FOUND`. Conversely, as soon as any single live feed matches it is `FOUND`, because existence needs only one source
 
-**日曆查的是「出席」這一項，消不掉信裡明確要求的其他動作。**
-填報名表、登記票券、繳費、回覆出席人數，這些都不會因為活動在日曆上就辦完了。
-`FOUND` 只允許你略過「把 X 加進日曆」那一筆，以及雇主招募活動那一類的
-「去報名」（理由見上面，事件在日曆上就代表報過名了），其餘動作照樣要落地，
-`action` 寫那個動作本身而不是寫出席。這一條的反面曾經真的會漏件，
-因為使用者的日曆上同時有活動本身與周邊事件，`FOUND` 很容易成立。
+**The calendar check covers only the attend item and cannot cancel other actions the mail explicitly requires.**
+Filling in a registration form, registering a ticket, paying a fee, replying with the attendee count, none of these is done just because the event is on the calendar. `FOUND` only lets you skip the 「把 X 加進日曆」 entry, and the "register" item of the employer recruiting event category (reason above, the event being on the calendar means the user registered). Every other action must still be created, with `action` stating that action itself rather than attendance. Getting this rule backwards really did drop items once, because the user's calendar holds both the event itself and side events around it, so `FOUND` is easily true.
 
-**但同一封信的多個動作要寫成同一筆待辦，不是各建一筆。**
-腳本以 message id 為鍵做 upsert，同一輪報兩筆同 id 的 `todos`，後面那筆的 `action`
-會直接蓋掉前面那筆，等於你以為建了兩件事、實際只留下一件。
-要保留就全部寫進同一個 `action` 字串裡，例如
-「9-12 志工訓練 填訓練報名表並繳 200 元保證金」。
+**But multiple actions from the same mail go into one todo, not one todo each.**
+The script upserts keyed by message id. If one round reports two `todos` with the same id, the later one's `action` simply overwrites the earlier one, so you think you created two things but only one is kept. To keep them all, write them all into one `action` string, for example 「9-12 志工訓練 填訓練報名表並繳 200 元保證金」.
 
-**`UNCHECKED` 絕對不能當成 `FOUND`。** 查不到不等於有，那個方向會讓使用者
-以為活動已經在日曆上而錯過它。腳本本身也遵守這條，部分日曆抓取失敗時回
-`UNCHECKED` 而不是 `NOT_FOUND`，因為缺席無法被證明。
+**`UNCHECKED` must never be treated as `FOUND`.** Failing to check does not mean it is there, and that direction makes the user think the event is already on the calendar and miss it. The script obeys this too. When some calendar fetches fail it returns `UNCHECKED` rather than `NOT_FOUND`, because absence cannot be proven.
 
-比對是「標題近似 + 日期相符」，因為日曆標題不會跟信件主旨逐字相同。
-週期性事件（例如每週三的課）會用 `RRULE` 判斷該日是否落在範圍內。
+Matching is "similar title + matching date", because calendar titles are not word-for-word identical to mail subjects. Recurring events (for example a class every Wednesday) use `RRULE` to decide whether the date falls within range.
 
-`calendarIcsUrls` 是清單而不是單一網址，因為**一個網址只涵蓋一個日曆**。
-訂閱的群組日曆要各自加一條。實例是 CodePath 的課程邀請寄件人是
-`...@group.calendar.google.com`，那是別人的日曆，不會出現在主日曆的 feed 裡。
+`calendarIcsUrls` is a list rather than a single URL, because **one URL covers only one calendar**. Each subscribed group calendar needs its own entry. A real case is that the CodePath course invitation sender is `...@group.calendar.google.com`, which is someone else's calendar and does not appear in the main calendar's feed.
 
-#### 忽略清單
-- 主旨開頭是 `[Job Scout]` 的職缺摘要信。那是使用者自己的爬蟲，
-  第 3 步的 query 已經按 `excludedSenders` 忽略掉，這裡是萬一漏網的保險
-- LinkedIn、Indeed、Glassdoor、Handshake、Lensa 等平台的職缺推播與 job alert。
-  **平台轉送的雇主來信不算職缺推播**，包含招募活動邀約與真人私訊，照主標準判斷
-- 純商業性的 newsletter、行銷促銷、產品宣傳、第三方 career fair 招攬。
-  **雇主自己辦的招募活動邀約不算這一類**
-- 應徵結果的拒信
-- 只說已收到你的應徵、而沒有任何下一步動作的自動確認信
-- GitHub 通知、社群平台通知等系統自動信
+#### Ignore list
+- Job digest mail whose subject starts with `[Job Scout]`. That is the user's own crawler, and the step 3 query already ignores it via `excludedSenders`, so this is insurance in case one slips through
+- Job pushes and job alerts from platforms such as LinkedIn, Indeed, Glassdoor, Handshake, Lensa. **Employer mail relayed by a platform is not a job push**, including recruiting event invitations and direct messages from real people, so judge it by the main criterion
+- Purely commercial newsletters, marketing promotions, product promotion, third-party career fair solicitations. **A recruiting event invitation run by the employer itself is not in this category**
+- Rejections of applications
+- Automatic confirmations that only say your application was received, without any next action
+- System auto-mail such as GitHub notifications and social platform notifications
 
-#### 去重規則
-**一律以 Gmail 的 message id 去重，只有這一條。**
-- 已經出現在 notifiedIds 裡的 id **整封跳過，不通知也不建待辦**，
-  直接放進 `judgedIds` 結案。那封信在被通知的那一輪就連待辦一起處理完了。
-  這也是使用者手動把 id 加進 `notifiedIds` 時的預期效果，代表「我自己處理掉了，別再提」
-- **不同 id 就是不同封信，必須各自判斷。** 不可以因為寄件人相同、主旨相同
-  就當成重複投遞而合併掉。求職往來大量使用同主旨的串接回覆，
-  例如 HR 在同一個 `Re: Next steps` 串裡先寄 OA 連結、稍後補寄面試選時段要求，
-  兩封都有各自的必辦動作，合併掉就漏了一項
-- 通知的呈現可以把同一串合併成一行文字，但每封信新增的動作與期限都要保留
+#### Dedupe rules
+**Always dedupe by Gmail message id, and this is the only rule.**
+- An id already in notifiedIds is **skipped entirely, with no notification and no todo**, and goes straight into `judgedIds` to close it. That mail was fully handled, todo included, in the round it was notified. This is also the intended effect when the user manually adds an id to `notifiedIds`, meaning "I handled it myself, don't bring it up again"
+- **A different id is a different mail and must be judged on its own.** Do not merge them as a duplicate delivery because the sender and subject are the same. Job correspondence uses same-subject threaded replies heavily. For example HR first sends an OA link in one `Re: Next steps` thread and later sends a request to pick an interview slot. Both have their own mandatory action, and merging them drops one
+- The notification's presentation may merge one thread into one line of text, but each mail's new actions and deadlines must be kept
 
-#### 什麼時候該讀內文
-只有在寄件人、主旨與 snippet 都無法判斷、而且結果會左右要不要通知時，才用
-mcp__gmail__get_email_body。
+#### When to read the body
+Use mcp__gmail__get_email_body only when sender, subject and snippet cannot decide it and the result would affect whether to notify.
 
-**讀內文沒有次數上限，這輪掃到的信這輪就要判完。**
-判斷不出來就讀，不要壓著不讀留給下一輪。省用量原則在這一條前面要讓位，
-因為讀一封內文只是幾百個 token，漏掉一封該辦的信沒有上限。
+**There is no limit on body reads, and mail scanned this round must be fully judged this round.**
+If you cannot decide, read it. Do not hold it back for the next round. The Usage-saving principle gives way to this rule, because reading one body costs only a few hundred tokens while missing one mail that needed action has no upper bound.
 
-該讀內文的典型情況
-1. judgeNow 裡的舊欠帳，全部判掉，不要再往後遞延
-2. 學校、政府、銀行、保險、房東、學貸寄來的信，只要還沒排除必辦事項
-3. snippet 看得出可能要使用者辦事、但句子被截斷看不完的
-4. 疑似 recruiter 或 HR 真人來信、但主旨看不出是自動信、拒信、還是真人回覆的
-5. **已報名活動的行前通知。** 這類信的排版固定是日期時間地點在前、要辦的事在後，
-   而 snippet 的長度只裝得下前半段，所以 snippet 永遠看起來像純資訊。
-   這是唯一一類「snippet 看起來沒事」反而要讀內文的信，不要用 snippet 結案
+Typical cases for reading the body.
+1. Old backlog in judgeNow. Judge all of it and do not defer it any further
+2. Mail from a school, government, bank, insurer, landlord or student loan, as long as a mandatory task has not been ruled out
+3. Mail whose snippet shows the user may need to do something but the sentence is cut off
+4. Suspected mail from a real recruiter or HR person whose subject does not show whether it is an auto-mail, a rejection or a real person's reply
+5. **Pre-event notices for registered events.** Such mail is always laid out with date, time and place first and the task after, and the snippet holds only the first half, so the snippet always looks purely informational. This is the only kind of mail where a snippet that looks fine means you must read the body anyway, so do not close it on the snippet
 
-不要為純商業行銷或平台 job alert 讀內文，那些憑形式就排除得掉。
+Do not read the body for pure commercial marketing or platform job alerts, since those can be excluded on form.
 
-**讀完內文還是判斷不出來的，不可以當成不重要。**
-把它放進第 6 步的 `defer`，下一輪會優先處理。
-資訊不足是「還沒判」，不是「判定為不重要」。
-`get_email_body` 取不到內文時也一樣進 `defer`，不要當成沒事。
-但 `defer` 現在是例外而不是常態 —— 沒有額度會用完，所以一封信留到下一輪
-只有「讀了也判不出來」這一個正當理由。
+**Mail you still cannot decide after reading the body must not be treated as unimportant.**
+Put it into `defer` in step 6, and the next round handles it first. Insufficient information means not yet judged, not judged unimportant. When `get_email_body` cannot fetch the body, it also goes into `defer`, and do not treat it as nothing. But `defer` is now the exception rather than the norm. No quota will run out, so the only legitimate reason to leave a mail for the next round is that reading it still did not settle it.
 
-要存 from / subject / snippet 而不是只存 id，有兩個原因。
-一是下一輪不用為了看清單再搜一次。
-二是水位推進之後那封信不會再出現在任何查詢裡，只留 id 就再也拿不回上下文，
-連「待確認」通知都寫不出來。
+There are two reasons to store from / subject / snippet rather than only the id. First, the next round does not have to search again just to see the list. Second, once the watermark advances that mail no longer appears in any query, so with only the id the context can never be recovered, and not even a 「待確認」 notification could be written.
 
-如果那封信已經有明確線索指向必辦事項、只是細節看不完，
-可以直接通知並在摘要裡標「待確認」，不要壓著不說。
+If the mail already has clear clues pointing to a mandatory task and only the details cannot be fully seen, you may notify directly and mark 「待確認」 in the summary rather than holding it back.
 
-### 5. 通知
+### 5. Notify
 
-通知只有一個管道，本機 Windows toast。**命令字串固定不要改寫**，
-allowlist 是逐字比對的，無人值守卡在權限提示等於整輪沒跑。
+Notification has exactly one channel, the local Windows toast. **The command string is fixed, so do not rewrite it.** The allowlist matches it verbatim, and an unattended run stuck at a permission prompt is the same as the whole round not running.
 
-**用 Bash 工具跑。** 下面這行是 `powershell.exe -NoProfile -File` 的形式，不含 `&`，
-所以不會被 Bash 當成背景執行符號。
+**Run it with the Bash tool.** The line below is in the `powershell.exe -NoProfile -File` form and contains no `&`, so Bash does not take anything in it as the background-execution operator.
 
 ```
 powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "<那一行訊息>" -Title "Gmail"
 ```
 
-**舊的 `& "路徑" ...` 形式已於 2026-09-10 停用，不要改回去。** 那個形式配 PowerShell
-工具在 2026-09-09 與 2026-09-10 各卡死一次權限提示，儘管兩層設定檔裡都有逐字相符的
-規則。下面「規則要同時放兩層」那一節記錄了完整的推斷過程。
+**The old `& "路徑" ...` form was retired on 2026-09-10. Do not switch back to it.** With the PowerShell tool, that form got stuck at a permission prompt once on 2026-09-09 and once on 2026-09-10, even though both layers of settings files held a verbatim-matching rule. The Rules go in both layers section above records the full chain of reasoning.
 
-回 `Toast sent.` 就是送達，把那一批 id 寫進第 6 步的 `notifiedIds`。
-失敗了不要重試、不要換一種寫法、不要改用別的工具，那一批留在佇列裡等下一輪。
+A reply of `Toast sent.` means it was delivered, so write that batch's ids into `notifiedIds` in step 6. On failure, do not retry, do not try another way of writing it and do not switch to another tool. That batch stays in the queue for the next round.
 
-**不要呼叫 `PushNotification`。** 它推的是手機，那條路要 Remote Control 才通，
-而使用者的學校沒有下放這個權限，所以它**永遠**會回
-`Mobile push not sent (Remote Control inactive)` 並且完全沒有送出。
-呼叫它只是每輪浪費一次往返，還會讓「到底有沒有通知到」變成一個要判斷的問題。
+**Do not call `PushNotification`.** It pushes to a phone, a route that works only with Remote Control, and the user's school has not granted that permission, so it **always** returns `Mobile push not sent (Remote Control inactive)` and sends nothing at all. Calling it only wastes one round trip per round, and it also turns "was the user actually notified" into a question that needs judging.
 
-訊息裡**不要出現雙引號**，那會截斷 PowerShell 的參數；`&`、`<`、`>` 不用管，
-腳本自己會轉義。
+**No double quotes** in the message, because they truncate the PowerShell argument. Do not worry about `&`, `<` and `>`, since the script escapes them itself.
 
-訊息一行、200 字元以內、不要用 markdown、欄位用斜線分隔、不要用冒號。
+The message is one line, at most 200 characters, no markdown, fields separated by slashes, no colons.
 
-**這份文件其他地方寫的「推播」，只要指的是我們自己發的通知，一律就是上面這個
-toast。** 提到 LinkedIn、Handshake 這些平台的「職缺推播」是另一回事，
-那是別人寄來的信，不要混在一起。
+**Wherever else this document speaks of a push, meaning a notification we send ourselves, it is always the toast above.** The job-alert pushes mentioned for platforms such as LinkedIn and Handshake are a different thing. Those are mail sent by others, so do not mix the two up.
 
-推播訊息本身用第二人稱的「你」，因為那是直接給使用者看的。
-這份指令檔的其他地方一律寫「使用者」。兩者不要互相統一。
+The push message itself uses the second person 「你」, because it is shown directly to the user. Everywhere else, this instruction file always says "the user". Do not unify the two.
 
-有下一步動作的排最前面並標「需動作」。有截止日一定要寫進去。
-但沒有截止日不代表不用通知。
+Mail with a next action goes first and is marked 「需動作」 (action needed). A deadline, when there is one, must be included. But having no deadline does not mean no notification is needed.
 
-範例
-- 需動作    Gmail 需動作 1 封 / Northeastern OGS / 9-15 前補交註冊文件
-- 無期限    Gmail 需動作 1 封 / Waymo recruiter 問你有無興趣 / 等你回覆
-- 混合      Gmail 重要信 2 封 / 需動作 房東要求 9-10 前確認續約 / Anthropic 面試邀約
-- 待確認    Gmail 需動作 1 封 / Northeastern OGS 疑似補件要求 / 待確認 請自行開信
-- 追趕中    Gmail 重要信 1 封 / Anthropic 面試邀約 / 尚有舊信未掃完
+Examples
+- Action needed    Gmail 需動作 1 封 / Northeastern OGS / 9-15 前補交註冊文件
+- No deadline    Gmail 需動作 1 封 / Waymo recruiter 問你有無興趣 / 等你回覆
+- Mixed      Gmail 重要信 2 封 / 需動作 房東要求 9-10 前確認續約 / Anthropic 面試邀約
+- Uncertain    Gmail 需動作 1 封 / Northeastern OGS 疑似補件要求 / 待確認 請自行開信
+- Catching up    Gmail 重要信 1 封 / Anthropic 面試邀約 / 尚有舊信未掃完
 
-沒有重要信就**不要推播**，安靜結束。但第 6 步仍然必須執行。
+With no important mail, **do not push** and end quietly. Step 6 must still run, though.
 
-`commit` 回傳 `shouldAnnounceBacklog` 為 true 時，即使沒有重要信也要發一則
-「尚有舊信未掃完」。節流已經由腳本做掉（最多每 3 輪一次），
-照它說的做就好，不要自己判斷要不要節流。
+When `commit` returns `shouldAnnounceBacklog` as true, send a 「尚有舊信未掃完」 push even if there is no important mail. The script already does the throttling (at most once every 3 rounds), so just do what it says and do not decide on throttling yourself.
 
-`begin` 的 `config.alert` 為 true 時同理，即使沒有重要信也要推。有重要信就接在
-同一則訊息末端，不要另發第二則。節流也已經由腳本做掉，不要自己判斷。
+The same applies when `begin`'s `config.alert` is true. Push even if there is no important mail. If there is important mail, append the alert to the end of that same message and do not send a second one. The script already does this throttling too, so do not judge it yourself.
 
-範例
-- 只有設定檔    Gmail 設定檔異常 / config.json 不存在 / 身分辨識已停用 / 請照 config.example.json 補一份
-- 併在信後面    Gmail 需動作 1 封 / Waymo recruiter 問你有無興趣 / 另設定檔 names 是空的，身分辨識已停用
+Examples
+- Config only    Gmail 設定檔異常 / config.json 不存在 / 身分辨識已停用 / 請照 config.example.json 補一份
+- Appended after mail    Gmail 需動作 1 封 / Waymo recruiter 問你有無興趣 / 另設定檔 names 是空的，身分辨識已停用
 
 ### 6. commit
 
-先把這輪的結果寫到 `Email_Check/round.json`
+First write this round's results to `Email_Check/round.json`.
 
 ```json
 {
@@ -761,338 +523,226 @@ toast。** 提到 LinkedIn、Handshake 這些平台的「職缺推播」是另�
 }
 ```
 
-**`step` 與 `commit` 讀這個檔案的方式對「少填」很寬鬆，但有四種情況算讀不出來。**
+**`step` and `commit` read this file leniently about omitted fields, but four cases count as unreadable.**
 
-1. JSON 語法壞掉，parse 不過
-2. 最外層不是一個物件
-3. `roundToken` 有填但跟這輪不符
-4. 六個陣列欄位裡有任何一個型別不對，見下面
+1. The JSON syntax is broken and does not parse
+2. The top level is not an object
+3. `roundToken` is filled in but does not match this round
+4. Any one of the six array fields has the wrong type, as described below
 
-其他一律沒事。檔案不存在等於空的、少填的欄位等於空陣列、多填的欄位被忽略、
-`roundToken` 整個不填也會通過。上面那個範本是**欄位總覽，不是必填清單**。
+Everything else is fine. A missing file counts as empty, an omitted field counts as an empty array, extra fields are ignored, and leaving out `roundToken` entirely also passes. The template above is **an overview of the fields, not a list of required ones**.
 
-**但型別寫錯是第四種讀不出來，不在寬鬆的範圍裡。**
-`important` / `failedNotify` / `defer` / `todos` / `notifiedIds` / `judgedIds`
-這六個欄位只要出現，就一定要是陣列，前四個的元素一定要是物件，
-後兩個的元素一定要是字串或數字。任何一條不符就整份 `round.json` 判定
-`FINDINGS_UNREADABLE`，這輪放棄、區間保留、下一輪重掃。
+**But a wrong type is the fourth unreadable case and is not covered by the leniency.** Whenever any of the six fields `important` / `failedNotify` / `defer` / `todos` / `notifiedIds` / `judgedIds` is present, it must be an array. The elements of the first four must be objects, and the elements of the last two must be strings or numbers. If any of these fails, the whole `round.json` is judged `FINDINGS_UNREADABLE`, the round is abandoned, the interval is kept, and the next round rescans it.
 
-`null` 也算寫錯。**不填**跟**填 `null`** 在這裡不一樣，不填是合法的空回報，
-填 `null` 是回報寫壞了。
+`null` also counts as wrong. **Omitting** a field and **filling in `null`** are different here. Omitting it is a valid empty report, while filling in `null` is a broken report.
 
-**每一筆物件裡的欄位型別也一樣會被擋。**
+**Wrong field types inside each object are rejected the same way.**
 
-| 欄位 | 型別 |
+| Field | Type |
 |---|---|
-| `from` / `subject` / `snippet` / `mailbox` / `received` / `action` / `summary` / `deadline` | 字串。`deadline` 沒有期限填**空字串**，不要填數字 |
-| `id` | 字串或數字都收，反正每個使用端都會 `str()` 它 |
-| `uncertain` | 只收真正的 `true` / `false`。**填字串 `"false"` 會被擋**，因為那在 GUI 端會被當成 true 而顯示「待確認」 |
-| `firstDeferredRound` / `createdRound` | 整數。這是腳本自己的記帳欄位，**你本來就不該填** |
+| `from` / `subject` / `snippet` / `mailbox` / `received` / `action` / `summary` / `deadline` | String. With no deadline, `deadline` gets an **empty string**, never a number |
+| `id` | String or number are both accepted, since every consumer calls `str()` on it anyway |
+| `uncertain` | Only a real `true` / `false`. **The string `"false"` is rejected**, because the GUI would treat it as true and show 「待確認」 (to be confirmed) |
+| `firstDeferredRound` / `createdRound` | Integer. These are the script's own bookkeeping fields, and **you should not fill them in at all** |
 
-任一欄不符就整份退回。**填 `null` 不算不符**，它等同於沒填那個欄位，
-腳本本來就會把 `null` 丟掉。
+If any field does not match, the whole file is sent back. **Filling in `null` does not count as a mismatch.** It is the same as omitting that field, since the script drops `null` anyway.
 
-它不能像少填欄位那樣被默默當成空的，理由是兩者救得回來的東西不同。
-少填欄位丟掉的是**已經在佇列裡**的欠帳，「預設保留」會把它留到下一輪。
-型別寫錯丟掉的是**這一批剛搜到、還沒落地**的信，它從來沒進過任何佇列，
-而 `step` 接著就要退休這個區間，水位一跨過去就再也找不回來。
-所以這裡只能整輪放棄換一次重掃，那是唯一保得住信的做法。
+A wrong type cannot be silently treated as empty the way an omitted field is, because what can be rescued differs between the two. An omitted field drops backlog items that are **already in a queue**, and the "keep by default" rule holds them for the next round. A wrong type drops mail that **this batch just found and that has not landed yet**. That mail was never in any queue, and `step` is about to retire this interval, so once the watermark crosses it, it can never be found again. So the only option here is to abandon the whole round and rescan, which is the only way to keep the mail.
 
-少填欄位不會讓這輪死在 `FINDINGS_UNREADABLE`，代價寫在下面各欄位自己的說明裡，
-是那封信留在佇列或漏掉一則通知，不是整輪中止。
+An omitted field does not kill the round with `FINDINGS_UNREADABLE`. Its cost, written in each field's own description below, is that the mail stays in a queue or a notification is missed, not that the whole round aborts.
 
-**每一筆 `important` / `defer` / `todos` 都一定要帶 Gmail 的 message `id`。**
-`id` 填成空字串、`None` 或 `null` 一律等於沒填，那筆會變成永遠無法解決的孤兒，
-只能靠 `itemsMissingId` 事後告警。搜尋結果本來就帶 `id`，照抄就好。
+**Every `important` / `defer` / `todos` entry must carry the Gmail message `id`.** An `id` given as an empty string, `None` or `null` all count as missing, and that entry becomes an orphan that can never be resolved, caught only afterwards by the `itemsMissingId` alert. Search results already carry `id`, so just copy it.
 
-`roundToken` 必須照抄 `begin` 給的值。腳本用它確認這份 findings 屬於這一輪，
-因為兩個排程共用同一個 `round.json`，補跑或手動執行時可能有兩輪交錯。
-token 不符會被當成讀取失敗而保留區間，那是安全方向；漏填則會讓檢查失效。
+`roundToken` must copy the value `begin` gave verbatim. The script uses it to confirm that these findings belong to this round, because the two schedules share one `round.json`, and a catch-up run or a manual run can interleave two rounds. A token mismatch is treated as a read failure and the interval is kept, which is the safe direction. Leaving it out disables the check.
 
-（`failedNotify` 仍然接受，但你不需要用它。`important` 已經涵蓋它的用途，
-因為判定重要就會落地，通知成功才會移除。）
+(`failedNotify` is still accepted, but you do not need it. `important` already covers its purpose, because mail judged important lands right away and is removed only once notification succeeds.)
 
-**佇列的規則是「預設保留」。** 沒有被列進上面任何一個欄位的欠帳，
-腳本會原封不動留到下一輪。這是刻意的，因為這一輪可能在 `commit` 之前就死掉，
-若把「沒回報」當成「已處理」，沒有人判過的信就會靜默消失。
+**The queue rule is "keep by default".** Any backlog item not listed in any of the fields above is left untouched by the script for the next round. This is deliberate, because this round may die before `commit`, and if "not reported" were treated as "handled", mail nobody judged would silently vanish.
 
-三個佇列各有各的出場條件，不是同一條。
+Each of the three queues has its own exit condition. They are not the same one.
 
-| 佇列 | 出現在 `begin` 的哪一欄 | 你回報什麼會讓它離開 | 使用者做什麼也會讓它離開 |
+| Queue | Which `begin` field it appears in | What you report that removes it | What the user does that also removes it |
 |---|---|---|---|
-| 待通知 | `notifyNow` | `notifiedIds`，也就是 toast 確定送出 | 在 GUI 勾選完成 |
-| 待判 | `judgeNow` / `judgeOverdue` | `judgedIds`，或把它列進 `important`（判為重要就轉進待通知佇列了），或 toast 對它送出成功 | 在 GUI 勾選完成 |
-| 待辦 | 不在 `begin` 裡，在待辦清單上 | 什麼都不會，**你永遠不要試圖移除** | 在 GUI 勾選完成 |
+| To-notify | `notifyNow` | `notifiedIds`, meaning the toast was definitely sent | Ticks it done in the GUI |
+| To-judge | `judgeNow` / `judgeOverdue` | `judgedIds`, or listing it in `important` (judged important, it moves into the to-notify queue), or a toast successfully sent for it | Ticks it done in the GUI |
+| 待辦 (todo) | Not in `begin`, it is on the 待辦清單 (task list) | Nothing does. **Never try to remove it** | Ticks it done in the GUI |
 
-右邊那一欄不是你的事，列出來只是要你知道「我沒回報它卻不見了」是正常的。
-勾選完成是使用者宣告這件事辦完了，腳本會把那個 id 一次從三個佇列都清掉。
+The rightmost column is not your business. It is listed only so you know that "I did not report it, yet it is gone" is normal. Ticking it done is the user declaring the matter finished, and the script clears that id from all three queues at once.
 
-所以 `judgedIds` 是**待判佇列**你這邊的主要出路，但不是三個佇列共通的唯一出路。
-同一個 id 同時列進 `judgedIds` 與 `defer` 時，腳本倒向保留，`defer` 贏。
+So `judgedIds` is your main exit for the **to-judge queue**, but not the single exit shared by all three queues. When the same id is listed in both `judgedIds` and `defer`, the script leans toward keeping it, and `defer` wins.
 
-`important` 放**這一批判定為重要的每一封信**，不分它會不會進待辦。
-`summary` 就是你要寫進推播的那一行文字。
+`important` holds **every message in this batch judged important**, whether or not it goes into 待辦. `summary` is the one line of text you put into the push.
 
-**`important`、`todos`、`defer` 三者都要帶 `mailbox` 跟 `received`。**
-兩欄都直接照抄搜尋結果，不要自己推、也不要自己換算時間。
+**All three of `important`, `todos` and `defer` must carry `mailbox` and `received`.** Copy both straight from the search results. Do not infer them yourself, and do not convert the time yourself.
 
-`mailbox` 是這封信原本寄到哪個信箱，使用者要靠它知道回哪個帳號翻原信。
-`scout` 是轉信中心，寄件人只說了誰寄的，沒說信現在躺在哪個帳號裡。
-信直接寄到中心本身時那一欄就是 `scout` 這個代號，MCP 已經把實際地址換掉了，
-所以照抄不會違反「不要寫出地址」那條。
+`mailbox` is the mailbox this message was originally sent to, and the user relies on it to know which account to go back to for the original. `scout` is the forwarding hub, and the sender says only who sent it, not which account the mail now sits in. When mail was sent straight to the hub itself, that field is the code name `scout`, since the MCP has already replaced the real address, so copying it does not break the "do not write out the address" rule.
 
-`received` 是那個信箱收到信的時間，MCP 給的已經是本地時間。
-**不要拿 `date` 代替它。** `date` 是寄件者自己寫的，落後 internalDate 的差值
-沒有上限，而 Gmail 是照 internalDate 排序和顯示的，所以只有 `received`
-對得上使用者在信箱裡看到的時間。
+`received` is when that mailbox received the message, and the MCP already gives it in local time. **Do not use `date` in its place.** `date` is written by the sender, its lag behind internalDate has no upper bound, and Gmail sorts and displays by internalDate, so only `received` matches the time the user sees in the mailbox.
 
-兩欄漏填都只是那一列少一行提示，不會讓這輪失敗。
+Leaving out either field only costs that row one line of hint and does not fail the round.
 
-`from` 跟 `subject` 也要填。通知成功之後，沒有對應待辦的那一筆會被腳本放進待辦清單的「待分類」，等使用者分級，那一列就是靠這三個欄位顯示的，`summary` 會當成那一列的動作說明。只填 `id` 跟 `summary` 不會出錯，但使用者會看到一列認不出來是哪封信的項目。
+`from` and `subject` must be filled in too. After a successful notification, an entry with no matching todo is put by the script into 待分類 (untriaged) on the 待辦清單 to wait for the user to grade it, and that row is displayed from these three fields, with `summary` used as the row's action text. Filling in only `id` and `summary` causes no error, but the user sees a row without being able to tell which message it is.
 
-同一封信同時列進 `todos` 的時候，腳本只會留你寫的那一筆待辦，不會再多一列。**這不需要你配合，照樣兩邊都列。** 腳本從推播建了幾筆，看 `filedFromPushThisRound`。
+When the same message is also listed in `todos`, the script keeps only the todo you wrote and adds no extra row. **This needs no cooperation from you. List it in both as usual.** For how many entries the script created from pushes, see `filedFromPushThisRound`.
 
-**這個欄位必須在呼叫該批的 `step` 之前寫進 `round.json`。**
-`step` 會把它跟區間退休一起原子提交，所以「判定為重要」在那一刻就持久化了，
-之後 `notifiedIds` 才是把它移除的條件。順序反過來就有一個致命窗口 ——
-`step` 一旦退休區間，水位就跨過那封信，它不會再出現在任何查詢裡。
-如果那時它還沒落地，程序當機就永久消失，連告警都發不出來。
+**This field must be written into `round.json` before calling that batch's `step`.** `step` commits it atomically together with the interval retirement, so "judged important" is persisted at that moment, and only after that is `notifiedIds` the condition for removing it. Reverse the order and there is a fatal window. Once `step` retires the interval, the watermark crosses that message and it never appears in any query again. If it has not landed by then, a process crash loses it permanently, without even an alert.
 
-**「真人寄來的個人往來信件」那個例外一定要放進 `important`。**
-它不進 `todos`（沒有可完成的動作），所以 `important` 是它唯一的落地點。
-漏填就是漏掉一封重要信。
+**The exception for personal correspondence from a real person must go into `important`.** It does not go into `todos` (it has no action to complete), so `important` is its only landing place. Leaving it out means missing an important message.
 
-`configAlerted` 只在這輪 `begin` 給了 `config.alert` 為 true、而且那段設定檔異常
-**確定推播成功**時才填 `true`。其他情況一律不填。`commit` 用它決定要不要把
-新的設定檔狀態記下來，記下來就等於下一輪不再警示。
+Set `configAlerted` to `true` only when this round's `begin` gave `config.alert` as true and that config-problem part was **definitely pushed successfully**. In every other case leave it out. `commit` uses it to decide whether to record the new config state, and recording it means the next round no longer alerts.
 
-`judgedIds` 放**已經判斷完、不需要再進佇列**的 id，包含判定為不重要的、
-以及 `judgeOverdue` 裡已經發過「待確認」通知的。
-**這是待判佇列的出路**，漏填會讓那封信一直排隊，
-每一輪都重新出現在 `judgeNow` 裡被判一次。判為重要的信不需要靠它，
-列進 `important` 就會轉進待通知佇列，見上面那張表。
+`judgedIds` holds ids that **are fully judged and need no further queueing**, including those judged unimportant and those in `judgeOverdue` that already got a 「待確認」 notification. **This is the exit from the to-judge queue.** Leaving one out keeps that message queued, reappearing in `judgeNow` to be judged again every round. Mail judged important does not rely on it, since listing it in `important` moves it into the to-notify queue, as the table above shows.
 
-`failedNotify` 放判定為重要但 toast 回報失敗或結果不明的信。
-**摘要必須連同 id 一起存**，因為水位推進之後那封信不會再出現在任何查詢裡，
-只留 id 就再也寫不出通知內容。
+`failedNotify` holds mail judged important whose toast reported failure or an unclear result. **The summary must be stored along with the id**, because after the watermark advances that message never appears in any query again, and with only the id the notification text can never be written.
 
-`todos` 放**有下一步動作要使用者做**的信，會進待辦清單讓使用者勾選。
+`todos` holds mail **with a next action for the user to take**. It goes onto the 待辦清單 for the user to tick off.
 
-- `action` 直接用你本來就要寫進推播的那一行文字，**不要另外寫第二份**。判斷已經做過了，
-  這裡只是把同一個結果落地，所以幾乎不增加 token
-- **「真人寄來的個人往來信件」那個獨立例外不要放進 todos。** 那類沒有可完成的動作，
-  進了清單就變成永遠勾不掉的雜訊。它照樣推播，只是不進待辦
-- `deadline` 用**完整的 `YYYY-MM-DD`**，例如 `2026-09-15`。沒有期限就填空字串。
-  一定要帶年份。只寫 `09-15` 的話 GUI 無法區分「上個月剛逾期」與「明年九月」，
-  而逾期的項目正是最該排在最前面的
-- `uncertain` 給「待確認 請自行開信」那種資訊不足但有必辦線索的
-- **一封信一個項目，用 message id 當鍵。** 不要用主旨或 thread 合併。
-  反過來也一樣，同一封信有好幾個動作時要整合進這一筆的 `action`，不可以拆成兩筆
-  同 id 的項目，那會被 upsert 蓋掉一筆，詳見「活動要先查日曆」那一節
-- **稱呼寫別人名字的信不要進 `todos`。** 那不是使用者要辦的事
-- 你**永遠不需要刪待辦，也永遠不要試圖刪**。只有「使用者勾選 + 腳本清理」會移除項目。
-  一封曾經判為待確認、後來發現是行銷的信，留著讓使用者自己勾掉，
-  不要自動撤回，那可能撤掉使用者還在意的東西
+- For `action`, use the same one line you were already going to write into the push, and **do not write a second version**. The judgment has already been made and this only lands the same result, so it adds almost no tokens
+- **Do not put the standalone exception for personal correspondence from a real person into todos.** That kind has no action to complete, so on the list it becomes noise that can never be ticked off. It is still pushed. It just does not go into 待辦
+- `deadline` uses the **full `YYYY-MM-DD`**, for example `2026-09-15`. With no deadline, fill in an empty string. The year is required. With only `09-15` the GUI cannot tell "just overdue last month" from "next September", and overdue items are exactly the ones that most need to sort first
+- `uncertain` is for the 「待確認 請自行開信」 kind, where information is insufficient but there are clues of something that must be done
+- **One item per message, keyed by message id.** Do not merge by subject or thread. The reverse holds too. When one message has several actions, combine them into this entry's `action` and never split them into two items with the same id, because the upsert would overwrite one of them. See the Check the calendar for events first section for details
+- **Mail whose salutation names someone else does not go into `todos`.** That is not the user's task
+- You **never need to delete a todo, and must never try to**. Only "user ticks + script cleanup" removes items. A message once judged 待確認 that later turns out to be marketing stays for the user to tick off. Do not withdraw it automatically, since that could withdraw something the user still cares about
 
-**`important`、`todos`、`defer` 三者都要在每一批處理完就寫進 `round.json`，
-不要等到最後。** `defer` 特別容易被忽略 —— 一封讀完內文仍然判不出來的信
-既不是 `important` 也還不是 `todo`，`defer` 是它唯一的落地點。
-`step` 一退休區間，水位就跨過它，那時還沒落地就永久消失。
-`step` 會把當下 `round.json` 裡的 todos 跟區間退休一起原子提交。
-攢到最後才寫的話，中途當機那一批的待辦會永久消失，而覆蓋已經推進過去了。
+**Write all three of `important`, `todos` and `defer` into `round.json` as soon as each batch is processed, not at the end.** `defer` is especially easy to overlook. A message that still cannot be judged after reading its body is neither `important` nor yet a `todo`, and `defer` is its only landing place. Once `step` retires the interval, the watermark crosses it, and if it has not landed by then it is gone for good. `step` commits the todos currently in `round.json` atomically together with the interval retirement. If you hold everything until the end to write it, a crash midway loses that batch's todos permanently while coverage has already moved past them.
 
-`defer` 放讀完內文仍然判不出來、或內文根本取不到的信。
-存 `from` / `subject` / `mailbox` / `received` / `snippet` 而不是只存 id，
-同樣是因為之後拿不回上下文。這封信後來變成待辦時，`mailbox` 與 `received`
-只能從這裡抄，水位已經蓋過去了。
-`firstDeferredRound` **不要自己填**，腳本會保留最早的那一次。
-自己填會把等待時鐘歸零，讓「等太久就發待確認」永遠不觸發。
+`defer` holds mail that still cannot be judged after reading the body, or whose body cannot be fetched at all. Store `from` / `subject` / `mailbox` / `received` / `snippet` rather than only the id, again because the context cannot be retrieved later. If the message later becomes a todo, `mailbox` and `received` can only be copied from here, since the watermark has already passed it. `firstDeferredRound` **must not be filled in by you**. The script keeps the earliest one. Filling it in yourself resets the waiting clock, so the "waited too long, send 待確認" rule never fires.
 
-然後用 Bash 工具跑 `... statemachine.py commit`。
+Then run `... statemachine.py commit` with the Bash tool.
 
-`COMMITTED` 回傳的欄位，除了第 5 步用到的 `shouldAnnounceBacklog` 與
-第 1 步說明過的 `configStatus` / `configAlertStillOwed`，還有兩個要看
+Among the fields `COMMITTED` returns, besides `shouldAnnounceBacklog` used in step 5 and `configStatus` / `configAlertStillOwed` explained in step 1, the following are also worth watching.
 
-- `shouldOpenTodoList` — 第 7 步照它決定要不要開待辦清單，不要自己重算
-- `newTodosThisRound` — 這輪新增幾筆待辦，可以寫進推播，但不是開窗的判斷依據
-- `filedFromPushThisRound` — 這輪推播的信裡，有幾封因為沒有對應待辦而被放進「待分類」。純粹告知，**不要因為它非 0 就多發一則推播**，那些信這輪已經推過了
-- `untriaged` / `triagedThisRound` — 「待分類」現在還有幾筆，以及使用者這輪分級了幾筆。純粹告知
-- `followedThisRound` — 使用者這輪移進或移出「追蹤中」幾筆。純粹告知
-- `archiveBlocked` / `restoreBlocked` / `triageBlocked` / `followBlocked` — 四個都是使用者在 GUI 上按的東西沒辦成。非空字串就是原因，空字串代表沒事。**一個都不能漏看**，全部照同一種方式處理，見下面那張表
+- `shouldOpenTodoList` is what step 7 follows to decide whether to open the 待辦清單. Do not recompute it yourself
+- `newTodosThisRound` is how many todos this round added. It may go into the push, but it is not the basis for opening the window
+- `filedFromPushThisRound` is how many of the messages pushed this round were put into 待分類 because they had no matching todo. It is purely informational. **Do not send an extra push because it is nonzero**, since those messages were already pushed this round
+- `untriaged` / `triagedThisRound` are how many items 待分類 still holds and how many the user graded this round. Purely informational
+- `followedThisRound` is how many items the user moved into or out of 追蹤中 (following) this round. Purely informational
+- `archiveBlocked` / `restoreBlocked` / `triageBlocked` / `followBlocked` all four mean something the user clicked in the GUI did not get done. A non-empty string is the reason, and an empty string means nothing is wrong. **Do not miss a single one.** Handle them all the same way, per the table below
 
-| 欄位 | 使用者按了什麼 | 他會看到的症狀 |
+| Field | What the user clicked | The symptom they see |
 |---|---|---|
-| `archiveBlocked` | 勾選完成，或在「待分類」或「追蹤中」按「封存」 | 勾過的項目一直不消失 |
-| `restoreBlocked` | 在已封存按「復原」 | 看字串分兩種。`restore file unreadable` 或 `archive unreadable` 是在動手之前就退出，**什麼都沒發生**，按了沒反應；`archive not writable` 是項目**已經回到待辦了**、只有已封存那份沒清掉，同一封信同時出現在兩區 |
-| `triageBlocked` | 在「待分類」選了緊急、重要或普通，或在待辦清單按「重新分類」 | 畫面上一直標著「已排定」，下一輪過了還是沒寫進去 |
-| `followBlocked` | 在待辦清單按「轉追蹤」，或在「追蹤中」按「回到待辦」或「天後提醒」 | 畫面上一直標著「已排定追蹤」、「已排定回到待辦」或「N 天後提醒 已排定」，下一輪過了還是沒寫進去 |
+| `archiveBlocked` | Ticked done, or clicked 封存 (archive) in 待分類 or 追蹤中 | Ticked items never disappear |
+| `restoreBlocked` | Clicked 復原 (restore) in 已封存 (archived) | Two kinds, depending on the string. `restore file unreadable` or `archive unreadable` means it exited before acting, so **nothing happened** and the click had no effect. `archive not writable` means the item **is already back in 待辦** and only the 已封存 copy was not cleared, so the same message shows in both sections |
+| `triageBlocked` | Picked 緊急 (urgent), 重要 (important) or 普通 (normal) in 待分類, or clicked 重新分類 (reclassify) on the 待辦清單 | The screen keeps showing 「已排定」, and after the next round it is still not written in |
+| `followBlocked` | Clicked 轉追蹤 (move to following) on the 待辦清單, or clicked 回到待辦 (back to todo) or 「天後提醒」 (remind after N days) in 追蹤中 | The screen keeps showing 「已排定追蹤」, 「已排定回到待辦」 or 「N 天後提醒 已排定」, and after the next round it is still not written in |
 
-**這四種一律當成「這輪沒做完」，不要斷言它會不會自己好。** 同一個字串涵蓋兩種命運：
-`archive not writable` 既可能是另一輪同時改了封存檔而輸掉版本檢查（暫時的），
-也可能是檔案真的寫不進去（不會自己好）。**回傳值分不出是哪一種，你也不要猜。**
-連續幾輪都出現只代表值得去看一眼，不代表已經確定是後者，因為每一輪都各自輸掉
-一次版本檢查也會印出一模一樣的字串。照實轉述給使用者，讓他自己決定要不要查。
+**Treat all four as "this round did not finish", and do not assert whether it will fix itself.** One string covers two fates. `archive not writable` may mean another round changed the archive file at the same time and this one lost the version check (temporary), or that the file truly cannot be written (it will not fix itself). **The return value cannot tell which, and you must not guess.** Appearing several rounds in a row only means it is worth a look, not that the latter is confirmed, because each round losing a version check on its own also prints the exact same string. Relay it to the user as it is and let them decide whether to investigate.
 
-非空字串就把那句話接在推播末端告訴使用者，**即使這輪沒有重要信也要推**，
-因為他會以為是自己沒按到。`archiveBlocked` 的典型值是 `tick file unreadable` /
-`archive unreadable` / `archive not writable`，其餘兩個形狀類似。
-不要為它們單獨發第二則推播，接在同一則末端就好
-- `itemsMissingId` — 佇列裡有幾筆沒有可用 `id`。非 0 就在推播末端加一句
-  「有 N 筆缺 id 無法追蹤」，但**不要為它單獨發推播**，它不會自己變好也不緊急
+For a non-empty string, append that sentence to the end of the push to tell the user, and **push even if this round has no important mail**, because they will think they did not click it properly. Typical `archiveBlocked` values are `tick file unreadable` / `archive unreadable` / `archive not writable`, and the other two have a similar shape. Do not send a separate second push for them. Appending to the end of the same one is enough
+- `itemsMissingId` is how many queue items have no usable `id`. If nonzero, add the sentence 「有 N 筆缺 id 無法追蹤」 to the end of the push, but **do not send a separate push for it**, since it will not get better on its own and is not urgent
 
-`itemsMissingId` 非 0 幾乎一定是前面某一輪回報時漏填 `id` 造成的。那種項目
-永遠無法用 id 去重、無法勾選完成、也無法被抓回來讀，就這樣卡在佇列裡。
-所以真正的重點是**預防**，見下面那條。
+A nonzero `itemsMissingId` is almost always caused by some earlier round leaving out `id` in its report. Such items can never be deduped by id, ticked done or fetched back to read, so they just sit stuck in the queue. So the real point is **prevention**. See the rule above that every entry must carry the Gmail message `id`.
 
-### 7. 待分類有東西就開待辦清單
+### 7. Open the task list when 待分類 has items
 
-`commit` 回傳 `shouldOpenTodoList` 為 `true` 時，跑「待辦清單的圖形介面」那一節的
-`open-task-list.ps1` 命令。是 `false` 就**不要開**，不要自己重算條件。
+When `commit` returns `shouldOpenTodoList` as `true`, run the `open-task-list.ps1` command from The task list GUI section. When it is `false`, **do not open it**, and do not recompute the condition yourself.
 
-條件只有一個，「待分類」裡還有沒分級的信，不管是這一輪還是更早進來的。沒分級的信不會自己離開那一區，所以使用者沒處理的話，每一輪都會再開一次，這是使用者要的。目前沒有安靜時段，清晨那一輪有東西也會開。`newTodosThisRound` 與 `untriaged` 照實回報，但不要拿它們自己下決定。
+There is only one condition, that 待分類 still holds ungraded mail, whether it came in this round or earlier. Ungraded mail does not leave that section by itself, so if the user does not handle it, the list opens again every round, and that is what the user wants. There is currently no quiet period, so the early-morning round opens it too if there is anything. Report `newTodosThisRound` and `untriaged` as they are, but do not use them to decide on your own.
 
-那個命令是射後不理。不要等它、不要讀它的輸出、不要因為它失敗就重試。
-**8765 埠已經有人在用時它會立刻自己結束，不管佔著那個埠的是誰。**
-它只測埠通不通，沒有辨識對方身分。絕大多數情況那就是使用者本來就開著的頁面，
-而那個頁面每 30 秒自己更新，會自動看到這輪的新待辦。
-但萬一是別的程式佔著，這輪就只是沒開窗，你照樣不要重試、不要換方式啟動。
+That command is fire-and-forget. Do not wait for it, do not read its output, and do not retry because it failed. **When port 8765 is already in use, it exits at once by itself, no matter who holds the port.** It only tests whether the port answers and does not identify who is on the other end. In the vast majority of cases that is the page the user already has open, which refreshes itself every 30 seconds and will see this round's new todos automatically. But if some other program holds it, this round simply opens no window, and you still must not retry or launch it another way.
 
-## 使用者確認過的判例
+## Rulings the user confirmed
 
-下面每一條都是使用者本人看過實際郵件之後裁定的。**不要重新分類，不要在沒有
-使用者明確同意的情況下改動這一節。** 判斷規則跟這些判例衝突時，以判例為準，
-並且要回頭修規則而不是修判例。
+Every entry below was ruled by the user personally after seeing the actual mail. **Do not reclassify them, and do not change this section without the user's explicit consent.** When the judgement rules conflict with these rulings, the rulings win, and you must go back and fix the rules, not the rulings.
 
-會出現漂移的原因是這些案例讀起來都像它們的反面，所以每一條都附上分界點。
+Drift happens because each of these cases reads like its opposite, so every entry comes with its dividing line.
 
-| 郵件 | 裁定 | 分界點 |
+| Mail | Ruling | Dividing line |
 |---|---|---|
-| 某銀行的信用卡帳單通知 | **是待辦** | 帳單要求一件還沒做的事。信裡沒寫金額與期限不影響，下一步動作就是登入查看並繳款。不要因為它讀起來像交易紀錄就排除 |
-| Tesla Supercharging Your Resume Workshop 行前提醒 | **是待辦，但要先查日曆** | 已報名等於已承諾。日曆上已經有就不建待辦，使用者要的是抓缺漏。不要因為它讀起來像活動宣傳或像報名確認就排除 |
-| 志工組「煩請補交 Facebook 連結」，開頭寫 `Hi Hsiao Ming` | **不是待辦，不推播** | 稱呼是別人的名字，那件事是別人要辦的。不要用「待確認」處理，直接結案 |
-| `Volunteer TaiwanNext <volunteer@taiwannext.org>` 的「【行前通知】9/12 Taiwan Tech Summit 志工訓練」，開頭寫 `Dear Taiwan Next Volunteers` | **是待辦**，動作是填訓練報名表，不是出席 | 2026-09-10 裁定，當初判成不重要是錯的。三個分界點。一，**「行前通知」這個詞本身就代表使用者已經答應要去**，寄這種信的前提是收件人在名單上。二，`Dear ... Volunteers` 是**群體稱呼不是別人的名字**，跟上一列那封 `Hi Hsiao Ming` 不同，群體稱呼不構成排除證據。三，snippet 只到日期時間地點就被截斷，**要辦的事在後面看不到**，所以這類信不可以用 snippet 結案。使用者原話是「行前通知代表這是我會參加的活動，所以這其實是我要注意的事情」 |
-| 應徵結果拒信 | **不重要** | 沒有下一步動作，也改變不了結果。真人親筆寫的拒信同樣不通知 |
-| 從某地登入、新裝置登入、確認「這是你嗎」 | **不重要** | 地理位置警示會一直來，量大且看完就沒事。但「設定已被改掉而使用者沒做過」要通知 |
-| Handshake 職缺推播，主旨帶使用者的名字 | **不重要** | 行銷信一樣會做個人化。名字只用來辨識收件對象，不是重要性訊號 |
-| `Lauren Martinez via Handshake` 的 ServiceNow Early in Career Recruiting Kick Offs 邀約 | **是待辦** | 2026-09-17 裁定，當初判成不重要是錯的。只要是**雇主自己辦的招募活動**就歸為重要並進待辦，**不必使用者先報名過**，開頭寫 `Hi there` 沒指名、帶 Register 連結都不構成排除。分界在誰辦的 —— 雇主自己辦的算，第三方 career fair 主辦方招攬的仍然排除。透過 Handshake 轉送不影響，平台只是投遞管道。使用者原話是「只要判斷是招募的活動，就應該要歸類到重要的郵件，然後進待辦清單」 |
-| `<某個人名> (Canva) <no-reply@canva.com>` 的分享通知 | **不重要，不推播** | 本質是「你多了一個檢視或編輯權限」，沒有要辦的事。**寄件人不是真人** —— 顯示名稱有人名但地址是 `no-reply@`，判斷寄件人一律看實際地址。若真人從自己信箱寄來同樣的分享通知，那算重要要通知 |
-| 某銀行的月綜合對帳單 | **是待辦** | 使用者會去核對帳務是否正常，所以動作是「去查一遍」。跟繳款型帳單的理由不同但同樣是待辦 |
-| 某卡發行機構的安全訊息中心「有新訊息請登入查看」 | **尚未裁定，規則刻意不改** | 使用者說這一封確實重要，但不確定以後內容相似的是否都重要，所以先不立規則，累積更多樣本再判。**不要自行補一條規則，也不要把它歸進任何既有類別。裁定之前的做法見下面「尚未裁定的案例怎麼處理」** |
-| 帶一次性驗證碼的信 | **不重要，不推播** | 2026-09-22 裁定。使用者當下就會處理掉，而且碼幾分鐘就過期，排程最長隔 8 小時 15 分才看到，所以建出來的待辦一定是死的。**分界在碼還是連結** —— 驗證連結照舊是待辦，同一封信兩種都給時當成連結。帳號被實際改動過的通知不受這條影響，照樣要通知。使用者原話是「如果是有驗證碼 我覺得算例外 因為我通常當下就會處理 可以算在已處理裡面」 |
-| Career Development Silicon Valley 的「Thank You For Attending the Career Symposium!」，內文請填五分鐘問卷 | **不重要，不進待辦，不推播** | 2026-09-24 裁定，當初判成待辦是錯的。意見回饋表單不進待辦，即使來自學校、即使使用者參加過那場活動。**例外只到意見回饋表單為止**，報名表、補件、出席回覆與其他任何表單照樣是待辦。使用者原話是「如果是 fill out survey 可以不用加到 代辦事項」，隨後補充「不用加到代辦事項的表單只有意見回饋表單」 |
+| A bank's credit card statement notice | **Is a 待辦 (todo)** | A bill asks for something not yet done. The mail stating no amount or deadline does not change that. The next action is to log in, look and pay. Do not exclude it because it reads like a transaction record |
+| Pre-event reminder for Tesla Supercharging Your Resume Workshop | **Is a 待辦, but check the calendar first** | Having registered equals having committed. If it is already on the calendar, do not create a 待辦. What the user wants is to catch what is missing. Do not exclude it because it reads like event promotion or like a registration confirmation |
+| A volunteer team's 「煩請補交 Facebook 連結」, opening with `Hi Hsiao Ming` | **Not a 待辦, no push notification** | The greeting is someone else's name. That task is someone else's to do. Do not handle it as 「待確認」 (to be confirmed). Close it outright |
+| 「【行前通知】9/12 Taiwan Tech Summit 志工訓練」 from `Volunteer TaiwanNext <volunteer@taiwannext.org>`, opening with `Dear Taiwan Next Volunteers` | **Is a 待辦**, and the action is filling in the training registration form, not attending | Ruled on 2026-09-10. The original judgement of not important was wrong. Three dividing lines. One, **the word 「行前通知」 by itself means the user has already agreed to go**, since such mail presupposes the recipient is on the list. Two, `Dear ... Volunteers` is **a group greeting, not someone else's name**, unlike the `Hi Hsiao Ming` mail in the row above, and a group greeting is not evidence for exclusion. Three, the snippet is cut off right after the date, time and place, so **the thing to do comes later and cannot be seen**, and therefore mail like this must not be closed from the snippet. The user's own words were 「行前通知代表這是我會參加的活動，所以這其實是我要注意的事情」 |
+| Application rejection letter | **Not important** | There is no next action, and it cannot change the outcome. A rejection written personally by a real person is likewise not notified |
+| Sign-in from some location, sign-in from a new device, confirm 「這是你嗎」 | **Not important** | Location alerts keep coming, in high volume, and are done once read. But a setting that has already been changed without the user having done it must be notified |
+| Handshake job alert pushes with the user's name in the subject | **Not important** | Marketing mail personalizes too. The name only identifies the recipient and is not an importance signal |
+| The ServiceNow Early in Career Recruiting Kick Offs invitation from `Lauren Martinez via Handshake` | **Is a 待辦** | Ruled on 2026-09-17. The original judgement of not important was wrong. Any **recruiting event the employer runs itself** is classed as important and goes into 待辦, **without the user having to register first**, and neither an opening of `Hi there` that names no one nor a Register link counts toward exclusion. The dividing line is who runs it. One the employer runs itself counts, and solicitation by a third-party career fair organizer is still excluded. Being forwarded through Handshake does not matter, since the platform is only the delivery channel. The user's own words were 「只要判斷是招募的活動，就應該要歸類到重要的郵件，然後進待辦清單」 |
+| Share notification from `<某個人名> (Canva) <no-reply@canva.com>` | **Not important, no push notification** | In essence it says you gained a view or edit permission, and there is nothing to do. **The sender is not a real person.** The display name has a person's name but the address is `no-reply@`, and the sender is always judged by the actual address. If a real person sends the same share notification from their own mailbox, that counts as important and must be notified |
+| A bank's monthly consolidated statement | **Is a 待辦** | The user will check whether the accounts are in order, so the action is to go through it once. The reason differs from a payment bill, but it is a 待辦 all the same |
+| A card issuer's secure message center 「有新訊息請登入查看」 | **Not yet ruled, rules deliberately unchanged** | The user said this one is indeed important, but is unsure whether future mail with similar content will all be important, so no rule is set yet, and the decision waits until more samples accumulate. **Do not add a rule on your own, and do not file it under any existing category. For what to do before a ruling, see Cases not yet ruled on below** |
+| Mail carrying a one-time verification code | **Not important, no push notification** | Ruled on 2026-09-22. The user deals with it on the spot, and the code expires in minutes while the schedule may take as long as 8 hours 15 minutes to see it, so any 待辦 created from it is always dead. **The dividing line is code versus link.** A verification link is still a 待辦 as before, and when one mail gives both, treat it as a link. Notices that an account was actually changed are unaffected by this and are still notified. The user's own words were 「如果是有驗證碼 我覺得算例外 因為我通常當下就會處理 可以算在已處理裡面」 |
+| 「Thank You For Attending the Career Symposium!」 from Career Development Silicon Valley, whose body asks you to fill in a five-minute survey | **Not important, does not go into 待辦, no push notification** | Ruled on 2026-09-24. The original judgement of 待辦 was wrong. Feedback forms do not go into 待辦, even when they come from the school and even when the user attended that event. **The exception stops at feedback forms.** Registration forms, requests to submit missing documents, attendance replies and any other form are still a 待辦. The user's own words were 「如果是 fill out survey 可以不用加到 代辦事項」, later adding 「不用加到代辦事項的表單只有意見回饋表單」 |
 
-### 尚未裁定的案例怎麼處理
+### Cases not yet ruled on
 
-判例表裡標「尚未裁定」的那幾列，意思是**使用者刻意還沒定規則**，不是漏寫。
-但「沒有規則」不等於「沒有行為」，所以過渡期怎麼做寫在這裡。
+The rows marked "Not yet ruled" in the ruling table mean **the user has deliberately not set a rule yet**, not that one was left out. But having no rule does not mean having no behaviour, so what to do in the meantime is written here.
 
-**照一般的可行動性測試判斷，不要因為它還沒裁定就特別處理。**
-以卡發行機構那種「有新訊息請登入查看」為例，它有一個指名給使用者的下一步動作
-（登入去看），所以會通過測試、成為待辦。那是預期結果。
+**Judge it by the ordinary actionability test, and do not treat it specially because it has not been ruled on yet.** Take the card issuer's 「有新訊息請登入查看」 as an example. It has a next action addressed to the user (log in and look), so it passes the test and becomes a 待辦. That is the expected result.
 
-**不要做這三件事**
-- 不要因為「還沒裁定」就跳過它或不通知。那會讓樣本永遠累積不起來，
-  而使用者要的正是靠實際出現的樣本來判斷
-- 不要標成 `uncertain` 或「待確認」。那是給「確定要使用者辦、但細節看不完」的信，
-  不是給「規則還沒定」的信
-- 不要在判例表裡自己補一列，也不要把它歸進既有類別
+**Do not do these three things**
+- Do not skip it or leave it un-notified because it is not yet ruled. That would keep samples from ever accumulating, and judging from samples that actually show up is exactly what the user wants
+- Do not mark it `uncertain` or 「待確認」. That is for mail the user definitely has to act on but whose details cannot all be seen, not for mail whose rule is not set yet
+- Do not add a row to the ruling table yourself, and do not file it under an existing category
 
-這個預設偏向「多一筆待辦」而不是「漏一封信」，跟最高原則同方向，
-所以就算最後裁定為不重要，代價也只是使用者手動勾掉幾筆。
+This default leans toward one extra 待辦 rather than one missed mail, the same direction as the Top principle, so even if the final ruling is not important, the cost is only the user checking off a few items by hand.
 
-裁定會怎麼發生：使用者看待辦清單時會直接說哪幾筆判錯。那時才更新判例表。
+A ruling comes about when the user, looking at the task list, says directly which items were misjudged. Only then is the ruling table updated.
 
-## 待辦清單的圖形介面
+## The task list GUI
 
-使用者要看或勾選待辦時，自己跑
+When the user wants to view or check off 待辦, they run this themselves.
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\task_list\task_list_gui.py"
 ```
 
-會開一個只綁 127.0.0.1 的 Flask 伺服器並自動開瀏覽器，看完關掉即可。
-**網頁關掉程序就自己結束**，所以排程任務啟動它不會留下沒人關的伺服器。
-沒有任何頁面連上來的話也會在 90 秒後自己收掉，瀏覽器沒開起來不會變成孤兒程序。
+It starts a Flask server bound only to 127.0.0.1 and opens the browser automatically, and it can simply be closed after viewing. **When the page is closed the process ends by itself**, so a scheduled task that starts it leaves no server that nobody shuts down. If no page connects at all, it also shuts itself down after 90 seconds, so a browser that failed to open does not leave an orphan process.
 
-排程任務要啟動它時**只能用這個形式，字串固定不要改寫**。用 Bash 工具跑。
+When a scheduled task starts it, **only this form may be used, and the string is fixed and must not be rewritten**. Run it with the Bash tool.
 
 ```
 powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"
 ```
 
-`pythonw.exe` 與 `Start-Process` 那兩件事都搬進 `shared/open-task-list.ps1` 裡了，
-連同不開主控台視窗、以及讓伺服器脫離這一輪 session 獨立存活的理由。
-解譯器路徑在腳本裡用 `$env:USERPROFILE` 組出來，所以這份文件不含本機使用者名稱。
+Both the `pythonw.exe` part and the `Start-Process` part have moved into `shared/open-task-list.ps1`, together with the reasons for not opening a console window and for letting the server detach from this round's session and live on its own. The interpreter path is built inside the script from `$env:USERPROFILE`, so this document contains no local user name.
 
-字串逐字固定是因為 allowlist 是逐字比對的，無人值守卡在權限提示等於整輪沒跑。
-這個 `-File` 形式不含 `&`，跟 `notify.ps1` 走的是同一種已實測可用的呼叫方式。
+The string is fixed verbatim because the allowlist matches verbatim, and an unattended run stuck at a permission prompt is the same as the whole round not running. This `-File` form contains no `&`, and uses the same invocation style as `notify.ps1`, which has been tested to work.
 
-**排程絕對不要用 `conda run` 那個形式啟動它。** `conda run` 會等子程序結束，
-那一輪會整個卡在那裡直到使用者關掉網頁。腳本裡用的是 `Start-Process`，沒有這個問題。
+**A scheduled run must never start it with the `conda run` form.** `conda run` waits for the child process to exit, so the whole round would hang there until the user closes the page. The script uses `Start-Process`, which does not have this problem.
 
-### 待分類與待辦清單
+### 待分類 and the task list
 
-頁面上由上到下是「待分類」、「待辦清單」、「已封存」三區。2026-09-27 以前還有一區「重要事項」，放推播過但沒有待辦的信，沒處理的話下一輪就自動掃進已封存。使用者擔心來不及看就被清掉，所以改成現在這樣，沒有任何東西會自己離開「待分類」。
+From top to bottom the page has four sections, 「待分類」 (untriaged), 「待辦清單」 (task list), 「追蹤中」 (following up) and 「已封存」 (archived). Before 2026-09-27 there was also a section 「重要事項」 (important items), holding mail that had been pushed but had no 待辦, and anything not handled there was swept into 已封存 automatically in the next round. The user worried that things would be cleared before they had a chance to look, so it was changed to the current design, where nothing leaves 「待分類」 by itself.
 
-- **待分類** 是還沒分級的信。你判成待辦的信，以及推播過但沒有對應待辦的信，都先進這裡。每一列有「緊急」、「重要」、「普通」、「封存」四個按鈕。沒分級的就一直留著，下一輪還在
-- **待辦清單** 是分過級的，照緊急、重要、普通排序，同一級裡照截止日排。每一列只有「已完成」的勾選框和「轉追蹤」、「重新分類」兩個按鈕，刻意不放三個等級按鈕，免得按錯。「重新分類」會把它送回「待分類」
-- **追蹤中** 是使用者做完自己那一步、在等對方回應的。從待辦清單按「轉追蹤」進來，保留原本的等級。每一列有「回到待辦」與「封存」兩個按鈕，「回到待辦」回到原本的等級。進來滿三天還沒處理的那一列會變紅，紅的那一列可以填天數按「天後提醒」，延到那一天再變紅。變紅只是變紅，**不會因此開待辦清單，也不要為它推播**
-- **已封存** 是勾選完成或直接封存的，三天後清除，期間可以「復原」。有等級的回到原本的等級，從「追蹤中」封存的回到待辦清單而不是追蹤中，沒分級就封存的回到「待分類」，2026-09-27 以前封存的舊信一律當成「普通」
+- **待分類** is mail not yet given a level. Mail you judged to be a 待辦, and mail that was pushed but has no matching 待辦, both land here first. Each row has four buttons, 「緊急」 (urgent), 「重要」 (important), 「普通」 (normal) and 「封存」 (archive). Anything not given a level just stays, and is still there in the next round
+- **待辦清單** holds what has been given a level, sorted by 緊急, 重要, 普通, and within one level by due date. Each row has only the 「已完成」 (done) checkbox and two buttons, 「轉追蹤」 (move to following up) and 「重新分類」 (reclassify). The three level buttons are deliberately left out to avoid mis-clicks. 「重新分類」 sends it back to 「待分類」
+- **追蹤中** (following up) holds items where the user has done their own step and is waiting for the other side to respond. Items arrive from 待辦清單 via 「轉追蹤」 and keep their original level. Each row has two buttons, 「回到待辦」 (back to 待辦) and 「封存」. 「回到待辦」 returns it to its original level. A row that has been here for three full days without being handled turns red, and on a red row the user can enter a number of days and press 「天後提醒」 (remind in N days) to postpone turning red until that day. Turning red is only turning red. **It does not cause the task list to open, and do not push a notification for it**
+- **已封存** holds what was checked off as done or archived directly. It is cleared after three days, and until then it can be 「復原」 (restored). An item with a level returns to its original level, one archived from 「追蹤中」 returns to 待辦清單 rather than 追蹤中, one archived without a level returns to 「待分類」, and old mail archived before 2026-09-27 is always treated as 「普通」
 
-等級只有使用者能定。**`round.json` 的 `todos` 裡寫了 `priority`、`followSince` 或 `followRemindAt` 也會被腳本丟掉，不要寫。** 你唯一要做的是把 `important` 的 `from` / `subject` / `summary` 與 `todos` 照常填好。2026-09-27 切換時，原本清單上的待辦與「重要事項」裡的信都轉成了「普通」。
+Only the user can set the level. **Any `priority`, `followSince` or `followRemindAt` written into `todos` in `round.json` is dropped by the script anyway, so do not write them.** Your only job is to fill in the `from` / `subject` / `summary` of `important` and the `todos` as usual. At the 2026-09-27 switchover, the 待辦 already on the list and the mail in 「重要事項」 were all converted to 「普通」.
 
-寫入者分工是這套設計的核心，不要打破
-- `state.json` 只有 statemachine 寫，GUI 只讀
-- `tasks-archive.json` 只有 statemachine 寫，GUI 只讀
-- `tasks-checked.json`（勾選完成，以及「待分類」的封存）只有 GUI 寫，statemachine 只讀
-- `tasks-restore.json`（從已封存復原）只有 GUI 寫，statemachine 只讀
-- `tasks-triage.json`（分級與重新分類）只有 GUI 寫，statemachine 只讀
-- `tasks-follow.json`（轉追蹤、回到待辦與延後提醒）只有 GUI 寫，statemachine 只讀
+The division of writers is the core of this design. Do not break it.
+- `state.json` is written only by statemachine, and the GUI only reads it
+- `tasks-archive.json` is written only by statemachine, and the GUI only reads it
+- `tasks-checked.json` (checked off as done, and 封存 from 「待分類」) is written only by the GUI, and statemachine only reads it
+- `tasks-restore.json` (復原 from 已封存) is written only by the GUI, and statemachine only reads it
+- `tasks-triage.json` (assigning a level, and 重新分類) is written only by the GUI, and statemachine only reads it
+- `tasks-follow.json` (轉追蹤, 回到待辦 and 延後提醒 (postpone reminder)) is written only by the GUI, and statemachine only reads it
 
-後面四個是使用者對某一列下的指令。**這四個檔案你一律不准寫。**
-它們代表的是「使用者說做完了」、「使用者說拉回來」、「使用者說這封信是這個等級」、「使用者說這件事在等對方」，
-排程的 LLM 沒有立場替他宣告這四件事，權限設定檔裡也擋掉了這四個檔的編輯。
+The last four are commands the user issues on a row. **You must never write any of these four files.** They stand for "the user says it is done", "the user says pull it back", "the user says this mail is this level" and "the user says this is waiting on the other side". The scheduled LLM has no standing to declare these four things on the user's behalf, and the permission settings file also blocks edits to these four files.
 
-每個檔案只有一個寫入**元件**，配上原子換檔，讀者永遠看到完整的舊檔或完整的新檔。
-讓 GUI 跟 statemachine 都寫同一個檔會出現 lost update，
-而被蓋掉的可能正是這輪剛產生的新待辦。
+Each file has only one writing **component**, and together with atomic file replacement, a reader always sees either the complete old file or the complete new file. Letting both the GUI and statemachine write the same file would cause a lost update, and what gets overwritten could be exactly the new 待辦 this round just produced.
 
-**這個分工擋的是 GUI 與 statemachine 互踩，不是排程之間互踩。**
-`state.json` 與 `tasks-archive.json` 的寫入元件都只有 statemachine 一個，
-但那個元件可能同時有兩個排程程序在跑，所以它們另外各自靠 rev 檢查擋。
-**兩個檔案輸掉之後的下場不一樣，不要混為一談。**
+**This division stops the GUI and statemachine from clobbering each other, not scheduled runs from clobbering each other.** `state.json` and `tasks-archive.json` each have statemachine as their only writing component, but that component may have two scheduled processes running at once, so each file is additionally guarded by its own rev check. **What happens after a loss differs between the two files, so do not conflate them.**
 
-| 檔案 | 輸掉 rev 檢查時 | 你會看到 |
+| File | When it loses the rev check | What you see |
 |---|---|---|
-| `state.json` | 整輪中止，因為狀態是這輪唯一的落地點 | `STATE_CHANGED_ABORT` |
-| `tasks-archive.json` | 只有那一個歸檔動作放棄，這輪其餘照跑 | 對應的 `*Blocked` 非空字串 |
+| `state.json` | The whole round aborts, because state is the round's only landing point | `STATE_CHANGED_ABORT` |
+| `tasks-archive.json` | Only that one archiving action is abandoned, and the rest of the round carries on | The corresponding non-empty `*Blocked` string |
 
-封存這邊之所以可以只放棄一步，是因為那些動作都能重來。勾選檔與復原檔還在，
-下一輪照樣看得到，歸檔晚一輪沒有任何損失。rev 檢查是偵測不是鎖，
-殘餘窗口與代價寫在下面「已知限制」。
+The archive side can abandon just one step because those actions can all be redone. The checked file and the restore file are still there and the next round still sees them, so archiving one round late loses nothing. The rev check is detection, not a lock, and the remaining window and its cost are written in Known limitations below.
 
-## 已知限制
-兩個排程任務共用同一份狀態，指令層面無法上鎖。app 關機後錯過時段的任務會同時補跑，這種情況現在由 `begin` 回的 `ROUND_ALREADY_RUNNING` 擋掉，只有第一輪會真的開始，其餘的改跑 `wait` 等它結束，它死掉的話由其中一輪接手。擋不住的是兩輪的 `begin` 落在同一個幾毫秒的窗口裡，也就是一輪做完檢查、還沒寫出進度檔之前，另一輪也做完了檢查。那時兩輪都會往下走，但 `begin` 先寫 `state.json` 才碰 `round.json` 與進度檔，所以兩輪都在對方存檔之前讀到狀態的話，後寫的那輪收到 `STATE_CHANGED_ABORT` 就停，完全不會動到先到那輪的兩個 round 檔，先到那輪照常跑完。2026-09-27 以前是先寫 round 檔，輸的那輪會連帶把先到那輪的 token 蓋掉，兩輪一起死。還剩一個更窄的順序擋不住，後到那輪剛好在先到那輪寫完 `state.json`、還沒寫出進度檔的那幾微秒裡讀狀態，這時兩輪都寫得進 state，接著互相蓋掉 round 檔。那跟下面那段 rev 檢查的殘餘窗口屬於同一類，機率極低，後果也同樣不能保證只是重複通知。
+## Known limitations
+The two scheduled tasks share one state, and nothing at the instruction level can lock it. After the app has been shut down, tasks that missed their slots run their catch-ups at the same time. That case is now blocked by `ROUND_ALREADY_RUNNING` returned from `begin`. Only the first round actually starts, the others run `wait` instead until it finishes, and if it dies one of them takes over. What cannot be blocked is the two rounds' `begin` landing in the same window of a few milliseconds, that is, one round finishes its check and, before it writes the progress file, the other round also finishes its check. Then both rounds proceed, but `begin` writes `state.json` first and only then touches `round.json` and the progress file, so if both rounds read the state before the other one saved, the round that writes later gets `STATE_CHANGED_ABORT` and stops without touching either of the first round's two round files at all, and the first round runs to completion as usual. Before 2026-09-27 the round files were written first, so the losing round would also overwrite the first round's token and both rounds died together. One narrower ordering still cannot be blocked. The later round happens to read the state in the few microseconds after the first round has written `state.json` but before it has written the progress file. Then both rounds can write state, and next they overwrite each other's round files. That belongs to the same class as the rev check's remaining window in the paragraph further below. The probability is extremely low, and likewise the consequence cannot be guaranteed to be only a duplicate notification.
 
-**「整輪放棄」指的是中止的那一次呼叫，不是那一輪做過的每一件事。**
-先前每一個成功的 `step` 都已經把自己那批 findings 連同區間退休原子存檔了，
-中止不會回滾它們，也不需要回滾，因為那些信已經落地。真正保留下來重掃的只有
-中止當下那一批，它的區間刻意沒退休。這跟 `FINDINGS_UNREADABLE` 與
-`NO_ROUND_IN_PROGRESS` 是同一個道理。
+**"Abandoning the whole round" refers to the one call that aborted, not to everything that round did.** Every earlier successful `step` has already atomically saved its own batch of findings together with the retirement of its interval, and the abort does not roll them back, nor does it need to, because that mail has already landed. The only thing actually kept for rescanning is the batch at the moment of the abort, whose interval was deliberately not retired. This is the same reasoning as for `FINDINGS_UNREADABLE` and `NO_ROUND_IN_PROGRESS`.
 
-**但 rev 檢查是偵測不是鎖，殘餘窗口沒有被消掉。** 它讀 disk rev 跟寫檔之間還隔著
-幾微秒，兩輪同時落在那幾微秒裡的話還是會 lost update，而被蓋掉的是整份 state，
-包含後寫那一輪已經退休的區間所對應的待辦。那種情況**會漏信**，
-所以不要再宣稱最壞只是重複通知。機率極低、成本極高，目前接受這個風險，
-真正要修得靠檔案鎖，先不處理。
+**But the rev check is detection, not a lock, and the remaining window has not been eliminated.** A few microseconds still separate its reading of the disk rev from its writing of the file, and if two rounds land in those microseconds together there is still a lost update, and what gets overwritten is the entire state, including the 待辦 corresponding to intervals the later-writing round has already retired. In that case **mail is missed**, so do not claim any more that the worst case is only a duplicate notification. The probability is extremely low and the cost extremely high. This risk is accepted for now. A real fix would need a file lock, which is not being handled yet.
 
-主查詢不掃 Spam 與 Trash。如果 recruiter 或學校的信被 Gmail 誤判為垃圾信，
-這個流程看不到。
+The main query does not scan Spam or Trash. If mail from a recruiter or the school is misjudged as spam by Gmail, this procedure cannot see it.
 
-`snippet` 是 Gmail 原封不動給的預覽字串，quoted-printable 的軟換行沒有還原，
-`=` 加空白會留在裡面並把單字切成兩半（實測到 `t= ime`、`conside= ration`）。
-判斷語意不受影響，但**把 snippet 的字句抄進推播前要先清掉這些痕跡**，
-不然使用者會看到亂碼。
+`snippet` is the preview string Gmail gives unmodified. Quoted-printable soft line breaks are not undone, so `=` plus a space stays inside and splits words in two (observed in practice as `t= ime` and `conside= ration`). Judging meaning is unaffected, but **before copying wording from the snippet into a push notification, clean these traces out first**, or the user will see garbage.
 
-## 禁止事項
-只能讀信。絕對不要回信、轉寄、封存、刪除、加標籤、標記已讀，或改動任何 Gmail 設定。
+## Forbidden
+Only read mail. Never reply, forward, archive, delete, add labels, mark as read, or change any Gmail setting.

@@ -28,15 +28,15 @@ from pathlib import Path
 
 DEFAULTS_PATH = Path(__file__).resolve().parent / "skill_deploy.toml"
 
-# The app passes only the body to the model, never the frontmatter, so the
-# language line goes in the body. It covers only the final reply: the Gmail
-# tasks write Chinese into round.json and the task list, which the state machine
-# and its tests read, and toast strings are matched by allow rules.
+# The app never passes frontmatter to the model, so the line goes in the body.
+# Rule files are English to save tokens, so without it all user-facing output
+# would be English. Verbatim strings stay exempt because allow rules and
+# self-checks match them exactly.
 LANGUAGE_LINE = (
-    "Write your final reply for this run in {language}. This sets the language of that reply, "
-    "and of any other output a rule file for this task says follows the SKILL.md language. "
-    "Everything else this task writes, such as files, notifications and state, keeps the "
-    "language its own rules or its existing data use."
+    "Write everything this run produces for the user to read in {language}. That covers your "
+    "final reply, report files, notification messages and any text that appears in a list or "
+    "page the user opens. Commands, file paths, code, and any heading, label or string a rule "
+    "file says to copy exactly stay as written."
 )
 
 
