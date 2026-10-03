@@ -36,10 +36,12 @@ tg.RESTORE_PATH = os.path.join(work, "tasks-restore.json")
 tg.TRIAGE_PATH = os.path.join(work, "tasks-triage.json")
 tg.FOLLOW_PATH = os.path.join(work, "tasks-follow.json")
 tg.LINKS_PATH = os.path.join(work, "mail-links.json")
+tg.LINK_LOG_PATH = os.path.join(work, "mail-links.log")
 tg.app.config["TESTING"] = True
 cli = tg.app.test_client()
 # Every /api/todos starts a link lookup, which would otherwise log in to the
 # real mailboxes. The link section below swaps in stubs of its own.
+REAL_LOOKUP = tg._lookup_links
 tg._lookup_links = lambda ids: {}
 
 fails = []
@@ -417,10 +419,17 @@ calls = []
 
 def broken(ids):
     calls.append(list(ids))
-    raise OSError("imap down")
+    raise OSError("login hub@gmail.example refused")
 
 
-clear(tg.LINKS_PATH)
+def log_lines():
+    if not os.path.exists(tg.LINK_LOG_PATH):
+        return []
+    with open(tg.LINK_LOG_PATH, encoding="utf-8") as fh:
+        return fh.read().splitlines()
+
+
+clear(tg.LINKS_PATH, tg.LINK_LOG_PATH)
 reset_links(broken)
 cli.get("/api/todos")
 settle()
@@ -428,6 +437,13 @@ d = cli.get("/api/todos").get_json()
 check("a failed lookup is retried once, then those todos stay plain with nothing pending",
       calls == [["g1", "x1"], ["g1", "x1"]] and all(r["link"] == "" for r in d["todos"])
       and d["linksPending"] is False, (calls, d))
+lines = log_lines()
+check("both failures and the give-up are logged with the error and the ids",
+      len(lines) == 3 and "attempt 1 of 2: OSError" in lines[0]
+      and "attempt 2 of 2" in lines[1] and "gave up" in lines[2] and "g1, x1" in lines[2],
+      lines)
+check("an address in the error is masked before it reaches the log",
+      "hub@gmail.example" not in "\n".join(lines) and "<address>" in lines[0], lines)
 check("ids given up on are not saved, so the next launch tries them again",
       read(tg.LINKS_PATH) is None, read(tg.LINKS_PATH))
 write(tg.STATE_PATH, {"todos": TODOS + [{"id": "n1", "subject": "arrived later"}]})
@@ -435,6 +451,33 @@ cli.get("/api/todos")
 settle()
 check("a todo arriving later gets its own two tries, and the given-up ones get none",
       calls[2:] == [["n1"], ["n1"]], calls)
+
+
+class FakeGmail:
+    """Stands in for the loaded gmail_mcp module, warning once per lookup."""
+
+    @staticmethod
+    def origin_links(ids, warn=None):
+        warn("no credentials in .env for other@gmail.example, 1 todo(s) left without a link: "
+             + ids[0])
+        return {i: None for i in ids}
+
+
+clear(tg.LINK_LOG_PATH)
+saved_gmail, tg._gmail = tg._gmail, FakeGmail
+got = REAL_LOOKUP(["w1"])
+tg._gmail = saved_gmail
+check("a warning from origin_links lands in the log",
+      got == {"w1": None} and len(log_lines()) == 1
+      and "no credentials in .env for other@gmail.example" in log_lines()[0], log_lines())
+
+saved_lines, tg.LINK_LOG_LINES = tg.LINK_LOG_LINES, 3
+for n in range(5):
+    tg._log_link(f"line {n}")
+tg.LINK_LOG_LINES = saved_lines
+check("the log keeps only its last LINK_LOG_LINES lines",
+      [x.split("  ", 1)[1] for x in log_lines()] == ["line 2", "line 3", "line 4"], log_lines())
+clear(tg.LINK_LOG_PATH)
 
 flaky_calls = []
 

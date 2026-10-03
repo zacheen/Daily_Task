@@ -10,7 +10,7 @@ immediately; the ping timeout is only a backstop for closes that send no
 beacon at all (crash, sleep, a discarded background tab).
 
 Writer discipline is the whole design. This process writes the four request
-files and its own link cache and nothing else, and only ever reads
+files, its own link cache and link log, and nothing else, and only ever reads
 `state.json` and the archive. statemachine.py is the reverse. With one writer
 per file plus atomic replace, a reader always sees a complete old or complete
 new file and no lock is needed.
@@ -44,6 +44,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -70,7 +71,13 @@ LINKS_PATH = os.path.join(HERE, "mail-links.json")
 # Bump when origin_links would answer differently for an id it already
 # answered (a new URL form or new None rules). A file of another version is
 # ignored, including one an older open copy of this page rewrites.
-LINKS_VERSION = 2
+LINKS_VERSION = 3
+# Why a todo got no link: failed lookups and origins without credentials.
+# The scheduled run starts this page under pythonw, so stdout reaches nobody
+# and this file is the only place those reasons land. Trimmed to the last
+# LINK_LOG_LINES lines on every write.
+LINK_LOG_PATH = os.path.join(HERE, "mail-links.log")
+LINK_LOG_LINES = 200
 # Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
 # order of 待辦清單. A todo with none of these is 待分類.
 PRIORITIES = ("urgent", "important", "normal")
@@ -188,10 +195,14 @@ def _read_json(path: str, default):
 
 
 def _atomic_write(path: str, payload) -> None:
+    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _atomic_write_text(path: str, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=HERE, prefix=".gui.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -521,7 +532,31 @@ def _lookup_links(ids: list[str]) -> dict[str, str | None]:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         _gmail = module
-    return _gmail.origin_links(ids)
+    return _gmail.origin_links(ids, warn=_log_link)
+
+
+def _log_link(message: str) -> None:
+    """Append one timestamped line to LINK_LOG_PATH, keeping the last
+    LINK_LOG_LINES. A failed write is dropped, since a log must not break the
+    lookup it reports on."""
+    line = time.strftime("%Y-%m-%d %H:%M:%S") + "  " + message
+    with _lock:
+        try:
+            with open(LINK_LOG_PATH, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            lines = []
+        try:
+            _atomic_write_text(LINK_LOG_PATH,
+                               "\n".join((lines + [line])[-LINK_LOG_LINES:]) + "\n")
+        except OSError:
+            pass
+
+
+def _redact(text: str) -> str:
+    """Mask addresses in an exception message. An IMAP error can quote the
+    login it failed on, and the hub's address must not reach any file."""
+    return re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "<address>", text)
 
 
 def _load_links() -> dict[str, str | None]:
@@ -551,14 +586,16 @@ def _save_links() -> None:
 
 def _resolve_links(ids: list[str]) -> None:
     found = None
-    for delay in (0, LINK_RETRY_DELAY):
+    for attempt, delay in enumerate((0, LINK_RETRY_DELAY), 1):
         time.sleep(delay)
         try:
             found = _lookup_links(ids)
             break
         except Exception as exc:
-            # Type only, since an IMAP error can quote the login it failed on.
-            print("mail links unavailable: " + type(exc).__name__)
+            _log_link(f"lookup of {len(ids)} todo(s) failed, attempt {attempt} of 2: "
+                      f"{type(exc).__name__}: {_redact(str(exc))}")
+    if found is None:
+        _log_link("gave up, no link while this page stays open for: " + ", ".join(ids))
     with _link_lock:
         if found is None:
             _given_up.update(ids)

@@ -52,6 +52,7 @@ with open(RUNNER, "w", encoding="utf-8", newline="\n") as fh:
         # would be saved over the real link cache as "no link".
         "tg._lookup_links = lambda ids: {}\n"
         "tg.LINKS_PATH = %r\n"
+        "tg.LINK_LOG_PATH = %r\n"
         "tg.STARTUP_GRACE = float(sys.argv[2])\n"
         "tg.CLIENT_TIMEOUT = float(sys.argv[3])\n"
         "tg.WATCHDOG_TICK = 0.4\n"
@@ -59,7 +60,7 @@ with open(RUNNER, "w", encoding="utf-8", newline="\n") as fh:
         "threading.Thread(target=tg._watchdog, daemon=True).start()\n"
         "tg.app.run(host='127.0.0.1', port=int(sys.argv[1]),\n"
         "           debug=False, use_reloader=False)\n"
-        % (SRC, os.path.join(WORK, "mail-links.json")))
+        % (SRC, os.path.join(WORK, "mail-links.json"), os.path.join(WORK, "mail-links.log")))
 
 fails = []
 
