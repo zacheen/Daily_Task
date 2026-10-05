@@ -109,6 +109,15 @@ The two Gmail tasks share this folder. `gmail-check-0625` fires at 50 minutes pa
 - `config.example.json`, the tracked template for the gitignored `config.json`, which holds personal data and the iCal URLs
 - `test/`, five test files run directly without pytest. `CLAUDE.md` says which one to run after which change
 
+## gmail_mcp/
+
+The read-only Gmail MCP server the two Gmail tasks search with, over IMAP with app passwords. It is registered at user scope as `gmail`, so every Claude Code session on this machine runs it from this folder, and moving the folder means registering it again with `claude mcp add gmail -s user`. The todo list page also imports its `origin_links` to build the link on each subject. Its own `README.md` covers setup, and it is written in Chinese.
+
+- `server.py`, the server and `origin_links`
+- `.env.example`, the tracked template for the gitignored `.env`, which holds both mailbox addresses and their app passwords
+- `test_origin_mailbox.py`, `test_origin_links.py` and `test_search_emails.py`, run directly without pytest and without network or credentials
+- `credentials.json` and `token.json` may also be present. They are gitignored leftovers from an earlier OAuth setup, and nothing reads them
+
 ## Personal_Task/
 
 Tasks that handle personal data live under here. One `.gitignore` rule excludes the whole folder, and each task inside is versioned in its own private repo, with its stubs in that repo's `Scheduled_Tasks/`.

@@ -100,10 +100,9 @@ WATCHDOG_TICK = 3
 # Months a bare MM-DD may lag the current month before it is treated as next
 # year rather than as recently overdue.
 BARE_LOOKBACK = 3
-# gmail_mcp is a sibling folder outside this repo. It is loaded on the first
-# lookup, so the page and its tests run without it.
-GMAIL_MCP = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE))),
-                         "gmail_mcp", "server.py")
+# gmail_mcp/ at the repo root. It is loaded on the first lookup, so the page
+# and its tests run without importing it.
+GMAIL_MCP = os.path.join(os.path.dirname(os.path.dirname(HERE)), "gmail_mcp", "server.py")
 # A failed lookup (IMAP unreachable, a revoked app password) is retried once
 # after this many seconds. If the retry fails too, the todos it covered get no
 # link from this process, because the user would rather find the mail by hand

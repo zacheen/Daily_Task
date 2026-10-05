@@ -263,6 +263,8 @@ Once you have the results, first judge this batch per step 4, **write this batch
 
 If the search errors or times out, retry once. If it still fails, report `... statemachine.py step --failed` instead.
 
+**A search that completes with no output means zero messages, not a failure.** The tool returns an empty list when nothing matches, and the client shows that as no output at all. A failed search always comes back as an error, because the MCP raises rather than returning an empty list. So report no output as `--count 0` with the `--lo` and `--hi` of that query. Reporting it as `--failed` is not the safe side here. It keeps a range that was already scanned and sends a false 「尚有舊信未掃完」 toast, which happened in one round when a 74-minute window really held no mail.
+
 Always look up the `status` from `step` in the master table at the start, and **it is likewise not repeated here**, for the same reason as in step 1. It may return any status whose subcommand column in the table includes step.
 
 When `stuck` is not empty, it means more than 40 messages are packed into the same second and cannot be bisected any further. The notification must say 「舊信追趕卡住 需人工處理」, because that will not resolve itself.

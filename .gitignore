@@ -31,6 +31,15 @@ Email_Check/task_list/.sm.*.tmp
 # Calendar feed cache. Derived, and holds real event titles.
 Email_Check/calendar-cache.json
 
+# The Gmail MCP server's secrets. .env holds both mailbox addresses and their
+# app passwords, and .env.example carries its schema. credentials.json and
+# token.json are an OAuth client secret and refresh token left from before the
+# switch to app passwords, which nothing reads. gmail_mcp/.gitignore lists them
+# too, but that file only travels with the folder, so the rule is repeated here.
+gmail_mcp/.env
+gmail_mcp/credentials.json
+gmail_mcp/token.json
+
 # Every task folder that works with personal data lives under here, so that one
 # rule covers the ones added later too. A per-folder rule made exposure the
 # default until someone remembered to write it, and a single stray file is
