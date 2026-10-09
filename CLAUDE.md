@@ -18,9 +18,9 @@ After changing `gmail_mcp/server.py`, run `gmail_mcp/test_origin_mailbox.py`, `g
 
 Edit the source under `Scheduled_Tasks/` in the repo and deploy it with `shared/deploy_skills.py`, as the README section "How scheduled tasks are wired" describes. An edit made directly to the deployed copy has no version control, and the next deploy treats it as an outside edit and refuses to overwrite it.
 
-## The 收件 and 收信 columns in the task list
+## The mailbox and received fields on a task list row
 
-Their values are not computed by the Email_Check code. `收件` is the mailbox a message was originally sent to before it was forwarded here, and `收信` is when that mailbox received it. The Gmail MCP computes both, and the scheduled LLM copies them into `round.json` unchanged. The derivation rules are `_origin_mailbox` and `_received` in `gmail_mcp/server.py`. That server lives in this repo since 2026-10-05 and is registered as the user-scope MCP server `gmail`, so every Claude Code session on this machine runs it from here. Moving or renaming `gmail_mcp/` means re-registering it with `claude mcp add gmail -s user` and updating `GMAIL_MCP` in `task_list_gui.py`.
+Their values are not computed by the Email_Check code. `mailbox` is the mailbox a message was originally sent to before it was forwarded here, and `received` is when that mailbox received it. The Gmail MCP computes both, and the scheduled LLM copies them into `round.json` unchanged. The derivation rules are `_origin_mailbox` and `_received` in `gmail_mcp/server.py`. That server lives in this repo since 2026-10-05 and is registered as the user-scope MCP server `gmail`, so every Claude Code session on this machine runs it from here. Moving or renaming `gmail_mcp/` means re-registering it with `claude mcp add gmail -s user` and updating `GMAIL_MCP` in `task_list_gui.py`.
 
 Changing those rules means running `gmail_mcp/test_origin_mailbox.py`. It covers two header shapes that were actually misjudged, including a bulk mail sent entirely through Bcc with no `To` at all.
 
@@ -30,9 +30,13 @@ The subject link opens the message in the mailbox that originally received it, n
 
 Changing those link rules means running `gmail_mcp/test_origin_links.py`. After changing the link format or the rules, increase `LINKS_VERSION` in `task_list_gui.py` by one. When the page sees a different version it drops the whole cache and looks everything up again. Otherwise the old links and the saved "no link" results stay in use until each todo leaves the list.
 
+## The task list page's languages
+
+Every word the page shows comes from a file in `Email_Check/task_list/locales/`. The page picks the file whose `language` equals `report_language` in `shared/skill_deploy.toml`, ignoring case, and falls back to `en.json` for a key the file lacks and for a language no file names. Adding a language means copying `en.json` and translating its `strings`, with no code change. Code, comments, `INSTRUCTIONS.md` and commit messages name the page's sections and buttons by their English labels. After changing a locale file or a label in the page, run `Email_Check/test/test_task_list_gui_api.py`, which checks that every key the page asks for exists in every locale with the same placeholders.
+
 ## Do not compress INSTRUCTIONS.md to save tokens
 
-On 2026-10-02 the user decided to translate `Email_Check/INSTRUCTIONS.md` into English to save tokens. A translation keeps every rule and every confirmed judgement, so it is not what the rest of this section rejects. The text the user reads, meaning the toasts and the task list fields in `round.json`, stays in Traditional Chinese, set by the language paragraph deployed into SKILL.md and stated again in the file's Goal section. The UI labels the code and the web page match, such as 待分類, 追蹤中 and 普通, stay in Chinese inside the English text.
+On 2026-10-02 the user decided to translate `Email_Check/INSTRUCTIONS.md` into English to save tokens. A translation keeps every rule and every confirmed judgement, so it is not what the rest of this section rejects. The text the user reads, meaning the toasts and the task list fields in `round.json`, stays in the language `report_language` names, which the deploy writes into the last paragraph of SKILL.md and the file's Goal section points at without naming it. On this machine that is Traditional Chinese, while the tracked template defaults a fresh clone to English. The task list page words its labels in that same language, as the section above describes, so the English text names them by their English labels.
 
 Compression was measured and rejected on 2026-09-20. The four Gmail tasks did not rank as a single line in the 24-hour usage attribution of Claude Code `/usage`, and three paragraphs that looked as if they were only for people each turned out, when checked one by one, to carry runtime rules. **Rarely used does not mean unused at runtime.** Compressing the procedure and reading less of each message body were rejected too. The first would change judgements the user confirmed. The second breaks the rule that missing a message that needed action is far worse than sending one extra notification, and this task fails silently.
 

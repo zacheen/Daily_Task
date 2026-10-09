@@ -80,7 +80,7 @@ Run it from the repo root. Another repo runs it the same way from its own root, 
 conda run --no-capture-output -n ML python shared/deploy_skills.py .
 ```
 
-When it deploys, the tool appends a paragraph setting the reply language, which comes from `shared/skill_deploy.toml` and is shared by every task. If the deployed copy was changed by the app's editor or by `update_scheduled_task`, the tool prints the diff and refuses to overwrite it, and adding `--replace-edited <task-id>` confirms the overwrite. `--check` only compares and writes nothing. The exit code is 0 when every task matches the repo, 1 when any task differs or was left alone, and 2 when an error stopped the run, such as a missing config or a broken stub. The hash of what was last deployed is kept in `~/.claude/skill_deploy_state.json`, which is this machine's state and stays out of version control.
+When it deploys, the tool appends a paragraph setting the reply language, which comes from `shared/skill_deploy.toml` and is shared by every task. The todo list page reads the same setting on every load, so changing it switches the page without a deploy. If the deployed copy was changed by the app's editor or by `update_scheduled_task`, the tool prints the diff and refuses to overwrite it, and adding `--replace-edited <task-id>` confirms the overwrite. `--check` only compares and writes nothing. The exit code is 0 when every task matches the repo, 1 when any task differs or was left alone, and 2 when an error stopped the run, such as a missing config or a broken stub. The hash of what was last deployed is kept in `~/.claude/skill_deploy_state.json`, which is this machine's state and stays out of version control.
 
 `shared/skill_deploy.toml` is gitignored, and the tracked file is `skill_deploy.example.toml` beside it. A fresh clone first copies the template to `skill_deploy.toml` and then edits it, and the tool points out this step when it cannot find the config. When the config's structure or defaults change, update the template to match.
 
@@ -106,6 +106,7 @@ The two Gmail tasks share this folder. `gmail-check-0625` fires at 50 minutes pa
 - `statemachine.py`, everything that must be correct rather than judged, meaning the time window, coverage, watermark, dedupe queue and atomic writes
 - `calendar_check.py`, which checks whether an event is already on the calendar through the secret iCal URLs in `config.json`
 - `task_list/task_list_gui.py`, the todo list page that open-task-list.ps1 starts. It exits on its own once no page is open
+- `task_list/locales/`, one file per page language. The page shows the one whose `language` matches `report_language`, and English when none does
 - `config.example.json`, the tracked template for the gitignored `config.json`, which holds personal data and the iCal URLs
 - `test/`, five test files run directly without pytest. `CLAUDE.md` says which one to run after which change
 

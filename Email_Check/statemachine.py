@@ -39,8 +39,8 @@ PROGRESS_PATH = os.path.join(HERE, "round-progress.json")
 # reads state.json and the archive, so no file has two writers and no
 # cross-process lock is needed. Each one is a verb the user aimed at a row:
 # ticked means done, restore means un-archive, triage means file this todo
-# under a level, or send it back to 待分類, and follow means move a filed todo
-# to 追蹤中 or back to 待辦清單. All four are read here.
+# under a level, or send it back to triage, and follow means move a filed todo
+# to the follow-up section or back to the todo list. All four are read here.
 # All five files live in task_list/, alongside the viewer.
 TASK_LIST_DIR = os.path.join(HERE, "task_list")
 CHECKED_PATH = os.path.join(TASK_LIST_DIR, "tasks-checked.json")
@@ -77,7 +77,7 @@ RECENT_COMMIT_SECONDS = 45 * 60
 JUDGE_WAIT_LIMIT_ROUNDS = 2
 BACKLOG_NOTICE_EVERY = 3
 # The levels a todo can be filed under, most urgent first, which is also the
-# GUI's sort order. A todo with none of them is 待分類 and stays there until the
+# GUI's sort order. A todo with none of them is in triage and stays there until the
 # user picks one, so nothing leaves that section on a clock.
 PRIORITIES = ("urgent", "important", "normal")
 # Todo fields only the user's GUI requests may set. A round's report carrying
@@ -359,8 +359,8 @@ def _is_remind_at(value: Any) -> bool:
 
 
 def _read_follow() -> tuple[dict[str, bool | int], str]:
-    """True asks for 追蹤中, false for back to 待辦清單, and an epoch integer
-    for 追蹤中 with the reminder moved to that moment. Anything else is
+    """True asks for follow-up, false for back to the todo list, and an epoch
+    integer for follow-up with the reminder moved to that moment. Anything else is
     dropped, since bool("false") would read as a yes."""
     wanted, err = _read_map_request(FOLLOW_PATH, "follow", "follow file unreadable")
     return {k: v for k, v in wanted.items()
@@ -500,7 +500,7 @@ class State:
         self.pendingNotify: list[dict] = list(data.get("pendingNotify", []))
         self.pendingJudge: list[dict] = list(data.get("pendingJudge", []))
         self.todos: list[dict] = list(data.get("todos", []))
-        # The 重要事項 queue from before triage. Only migrate_triage reads it,
+        # The important-items queue from before triage. Only migrate_triage reads it,
         # and save() no longer writes it back.
         self._legacy_notices: list[dict] = list(data.get("notices", []))
         self.notifiedIds: list[str] = list(data.get("notifiedIds", []))
@@ -541,7 +541,7 @@ class State:
         """Bring a file from before triage onto it, once.
 
         Everything already on the list, and every mail still waiting in the old
-        重要事項 queue, becomes 普通, the user's call for existing mail. A notice
+        important-items queue, becomes Normal, the user's call for existing mail. A notice
         whose message is already a todo adds nothing, because the todo carries
         the action the LLM wrote and the notice only the toast's summary.
         """
@@ -705,7 +705,7 @@ class State:
         self.todos = list(kept.values()) + list(orphans.values())
 
     def pushed_as_todos(self, pushed: list[dict], incoming: set[str]) -> list[dict]:
-        """Todos for pushed mail that has none, so it waits in 待分類 with the rest.
+        """Todos for pushed mail that has none, so it waits in triage with the rest.
 
         A message already on the list, or reported as a todo this round, keeps
         the row it has. The push carries only the toast's one-line summary,
@@ -733,7 +733,7 @@ class State:
         """Apply the levels the user picked in the GUI. Returns how many todos
         changed, plus why the request could not be read.
 
-        "" sends a todo back to 待分類, which is what 重新分類 asks for. Any other
+        "" sends a todo back to triage, which is what Re-triage asks for. Any other
         value outside PRIORITIES is ignored rather than stored, because the GUI
         could place such a row in neither section.
         """
@@ -751,27 +751,27 @@ class State:
                 changed += 1
             elif want == "" and "priority" in todo:
                 del todo["priority"]
-                # Or filing it again later would drop it straight into 追蹤中.
+                # Or filing it again later would drop it straight into follow-up.
                 for owned in FOLLOW_FIELDS:
                     todo.pop(owned, None)
                 changed += 1
         return changed, ""
 
     def consume_follow(self, now: int) -> tuple[int, str]:
-        """Move filed todos into 追蹤中 or back out. Returns how many changed,
+        """Move filed todos into follow-up or back out. Returns how many changed,
         plus why the request could not be read.
 
         `followSince` is the whole flag. It is stamped here rather than at the
         click, so a row's age counts from the round that applied it, up to one
-        slot late. The level is never touched, which is what lets 回到待辦
+        slot late. The level is never touched, which is what lets Back to todo
         return a todo to the level it left with.
 
         An integer request is a postponed reminder. The GUI computes the moment
         at the click, so the delay the user typed is not stretched by the wait
-        for this round, and it lands in `followRemindAt`. 回到待辦 clears both.
+        for this round, and it lands in `followRemindAt`. Back to todo clears both.
 
-        A todo with no level is refused, because the GUI files 追蹤中 only
-        from 待辦清單, and a flagged todo with no level would drop out of
+        A todo with no level is refused, because the GUI files follow-up only
+        from the todo list, and a flagged todo with no level would drop out of
         untriaged_count while sitting in neither section. Run this after
         consume_triage, so a row filed and followed in the same round lands.
         """
@@ -801,7 +801,7 @@ class State:
         return changed, ""
 
     def untriaged_count(self) -> int:
-        """Todos still in 待分類. An id-less one is left out, because the GUI
+        """Todos still in triage. An id-less one is left out, because the GUI
         can send no level back for it and it would hold the list open forever."""
         return sum(1 for t in self.todos
                    if _usable_id(t) is not None and t.get("priority") not in PRIORITIES)
@@ -813,7 +813,7 @@ class State:
 
     def consume_checked(self) -> tuple[list[dict], str]:
         """Archive todos the user ticked. Returns the archived todos plus why
-        none were. 待分類's 封存 button is the same tick, so this covers it too.
+        none were. Triage's Archive button is the same tick, so this covers it too.
 
         Only items already ticked when this runs are archived. Anything ticked
         during the round survives to the next one, so a box does not vanish the
@@ -875,8 +875,8 @@ class State:
         still treated it as settled and never re-notified it.
 
         A todo comes back at the level it was archived with. One with no level
-        that was archived before triage existed is old mail, which is 普通. One
-        archived since then was never triaged, so it goes back to 待分類.
+        that was archived before triage existed is old mail, which is Normal. One
+        archived since then was never triaged, so it goes back to triage.
         """
         wanted, err, _ = _read_id_request(RESTORE_PATH, "restoreIds",
                                           "restore file unreadable")
@@ -894,8 +894,8 @@ class State:
 
         live = {_usable_id(t) for t in self.todos}
         for item in back:
-            # The follow fields go too, so a todo archived from 追蹤中 comes
-            # back to 待辦清單 rather than resuming an age that kept counting.
+            # The follow fields go too, so a todo archived from follow-up comes
+            # back to the todo list rather than resuming an age that kept counting.
             clean = {k: v for k, v in item.items()
                      if k != "archivedAt" and k not in FOLLOW_FIELDS}
             try:
@@ -1088,7 +1088,7 @@ _FINDING_ENTRY_TYPES: dict[str, tuple[type, ...]] = {
     # split_debt and cmd_commit both do int() on these
     "firstDeferredRound": (int,), "createdRound": (int,),
     # The GUI's bool() is true for any non-empty string, so "false" would
-    # silently display as 待確認 -- a wrong answer, not a crash.
+    # silently display as unconfirmed -- a wrong answer, not a crash.
     "uncertain": (bool,),
 }
 
@@ -1445,7 +1445,7 @@ def cmd_commit(_args) -> int:
     resolved = notified | judged | {str(x.get("id")) for x in failed}
 
     # The shape the queues hold, for everything actually pushed this round, so a
-    # pushed mail with no todo can wait in 待分類 showing what the toast said.
+    # pushed mail with no todo can wait in triage showing what the toast said.
     # pendingNotify comes first so a fresh report wins the merge in
     # pushed_as_todos.
     #
@@ -1464,7 +1464,7 @@ def cmd_commit(_args) -> int:
     # The filter belongs here rather than in `pushed` itself. A retry can
     # genuinely succeed while the user ticks the same message between begin and
     # commit, so the push is real and `pushed` rightly holds it. Turning it into
-    # a todo anyway would put finished work straight back in 待分類.
+    # a todo anyway would put finished work straight back in triage.
     #
     # `ticked` is deliberately not subtracted from reported_ids:
     # reconcile_todos already drops a ticked id from the todo list.
@@ -1528,7 +1528,7 @@ def cmd_commit(_args) -> int:
           "newTodosThisRound": new_todos,
           "filedFromPushThisRound": len(filed),
           # Decided here rather than left to the round's own arithmetic. Mail
-          # left in 待分類 reopens the list every round until the user files
+          # left in triage reopens the list every round until the user files
           # it, which is the point: nothing leaves that section by itself.
           "shouldOpenTodoList": untriaged > 0,
           "untriaged": untriaged,

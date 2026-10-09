@@ -17,7 +17,7 @@ To change the **judgement criteria**, change this file. To change the **time win
 ## Goal
 Check the Gmail account `scout` for new mail since the last check, and judge whether any of it is important. Push a notification only when there really is important mail.
 
-Everything the user reads is written in the language the last paragraph of SKILL.md names, which is Traditional Chinese. That covers the toast messages and every text field in `round.json` that the task list shows, such as `summary` and `action`. The Chinese examples in this file show that form, and the UI labels such as 待分類 and 追蹤中 stay exactly as written.
+Everything the user reads is written in the language the last paragraph of SKILL.md names. That covers the toast messages and every text field in `round.json` that the task list shows, such as `summary` and `action`. The examples in this file are in Traditional Chinese and show that form, and under another language the same content goes in that language instead. The task list page words its sections and buttons in that same language, from the file under `Email_Check/task_list/locales/` whose `language` matches, so this file names them by their English labels. When a message to the user names one, use its wording from that file.
 
 The account parameter of the Gmail MCP tools must always be `"scout"`. This account alias is the only means of identification. **Do not look up the actual mailbox address it maps to, and do not write the address into any output**. Passing any other value fetches a different mailbox.
 
@@ -95,7 +95,7 @@ The `permissions.allow` of both layers must include the following.
 | `mcp__gmail__search_emails` | Fetch mail |
 | `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1"*)` | Local toast notification, current form |
 | `PowerShell(& "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" *)` | Old form, no callers left, kept for reference |
-| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"*)` | Open the 待辦清單 (task list), current form |
+| `Bash(powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\open-task-list.ps1"*)` | Open the task list, current form |
 | The `PowerShell(...)` version of each of the four current Bash rules above, with the string inside the parentheses identical word for word | Insurance for when the model runs the same command with the PowerShell tool, see below the table |
 | `mcp__gmail__get_email_body` | Read the body |
 | `Read(Email_Check/**)` and its absolute-path version | Read this file and config.json |
@@ -544,7 +544,7 @@ Everything else is fine. A missing file counts as empty, an omitted field counts
 |---|---|
 | `from` / `subject` / `snippet` / `mailbox` / `received` / `action` / `summary` / `deadline` | String. With no deadline, `deadline` gets an **empty string**, never a number |
 | `id` | String or number are both accepted, since every consumer calls `str()` on it anyway |
-| `uncertain` | Only a real `true` / `false`. **The string `"false"` is rejected**, because the GUI would treat it as true and show 「待確認」 (to be confirmed) |
+| `uncertain` | Only a real `true` / `false`. **The string `"false"` is rejected**, because the GUI would treat it as true and show its "Unconfirmed" flag |
 | `firstDeferredRound` / `createdRound` | Integer. These are the script's own bookkeeping fields, and **you should not fill them in at all** |
 
 If any field does not match, the whole file is sent back. **Filling in `null` does not count as a mismatch.** It is the same as omitting that field, since the script drops `null` anyway.
@@ -567,13 +567,13 @@ Each of the three queues has its own exit condition. They are not the same one.
 |---|---|---|---|
 | To-notify | `notifyNow` | `notifiedIds`, meaning the toast was definitely sent | Ticks it done in the GUI |
 | To-judge | `judgeNow` / `judgeOverdue` | `judgedIds`, or listing it in `important` (judged important, it moves into the to-notify queue), or a toast successfully sent for it | Ticks it done in the GUI |
-| 待辦 (todo) | Not in `begin`, it is on the 待辦清單 (task list) | Nothing does. **Never try to remove it** | Ticks it done in the GUI |
+| Todo | Not in `begin`, it is on the task list | Nothing does. **Never try to remove it** | Ticks it done in the GUI |
 
 The rightmost column is not your business. It is listed only so you know that "I did not report it, yet it is gone" is normal. Ticking it done is the user declaring the matter finished, and the script clears that id from all three queues at once.
 
 So `judgedIds` is your main exit for the **to-judge queue**, but not the single exit shared by all three queues. When the same id is listed in both `judgedIds` and `defer`, the script leans toward keeping it, and `defer` wins.
 
-`important` holds **every message in this batch judged important**, whether or not it goes into 待辦. `summary` is the one line of text you put into the push.
+`important` holds **every message in this batch judged important**, whether or not it goes into `todos`. `summary` is the one line of text you put into the push.
 
 **All three of `important`, `todos` and `defer` must carry `mailbox` and `received`.** Copy both straight from the search results. Do not infer them yourself, and do not convert the time yourself.
 
@@ -583,7 +583,7 @@ So `judgedIds` is your main exit for the **to-judge queue**, but not the single 
 
 Leaving out either field only costs that row one line of hint and does not fail the round.
 
-`from` and `subject` must be filled in too. After a successful notification, an entry with no matching todo is put by the script into 待分類 (untriaged) on the 待辦清單 to wait for the user to grade it, and that row is displayed from these three fields, with `summary` used as the row's action text. Filling in only `id` and `summary` causes no error, but the user sees a row without being able to tell which message it is.
+`from` and `subject` must be filled in too. After a successful notification, an entry with no matching todo is put by the script into "To triage" on the task list to wait for the user to grade it, and that row is displayed from these three fields, with `summary` used as the row's action text. Filling in only `id` and `summary` causes no error, but the user sees a row without being able to tell which message it is.
 
 When the same message is also listed in `todos`, the script keeps only the todo you wrote and adds no extra row. **This needs no cooperation from you. List it in both as usual.** For how many entries the script created from pushes, see `filedFromPushThisRound`.
 
@@ -597,15 +597,15 @@ Set `configAlerted` to `true` only when this round's `begin` gave `config.alert`
 
 `failedNotify` holds mail judged important whose toast reported failure or an unclear result. **The summary must be stored along with the id**, because after the watermark advances that message never appears in any query again, and with only the id the notification text can never be written.
 
-`todos` holds mail **with a next action for the user to take**. It goes onto the 待辦清單 for the user to tick off.
+`todos` holds mail **with a next action for the user to take**. It goes onto the task list for the user to tick off.
 
 - For `action`, use the same one line you were already going to write into the push, and **do not write a second version**. The judgment has already been made and this only lands the same result, so it adds almost no tokens
-- **Do not put the standalone exception for personal correspondence from a real person into todos.** That kind has no action to complete, so on the list it becomes noise that can never be ticked off. It is still pushed. It just does not go into 待辦
+- **Do not put the standalone exception for personal correspondence from a real person into todos.** That kind has no action to complete, so on the list it becomes noise that can never be ticked off. It is still pushed. It just does not go into `todos`
 - `deadline` uses the **full `YYYY-MM-DD`**, for example `2026-09-15`. With no deadline, fill in an empty string. The year is required. With only `09-15` the GUI cannot tell "just overdue last month" from "next September", and overdue items are exactly the ones that most need to sort first
 - `uncertain` is for the 「待確認 請自行開信」 kind, where information is insufficient but there are clues of something that must be done
 - **One item per message, keyed by message id.** Do not merge by subject or thread. The reverse holds too. When one message has several actions, combine them into this entry's `action` and never split them into two items with the same id, because the upsert would overwrite one of them. See the Check the calendar for events first section for details
 - **Mail whose salutation names someone else does not go into `todos`.** That is not the user's task
-- You **never need to delete a todo, and must never try to**. Only "user ticks + script cleanup" removes items. A message once judged 待確認 that later turns out to be marketing stays for the user to tick off. Do not withdraw it automatically, since that could withdraw something the user still cares about
+- You **never need to delete a todo, and must never try to**. Only "user ticks + script cleanup" removes items. A message once marked `uncertain` that later turns out to be marketing stays for the user to tick off. Do not withdraw it automatically, since that could withdraw something the user still cares about
 
 **Write all three of `important`, `todos` and `defer` into `round.json` as soon as each batch is processed, not at the end.** `defer` is especially easy to overlook. A message that still cannot be judged after reading its body is neither `important` nor yet a `todo`, and `defer` is its only landing place. Once `step` retires the interval, the watermark crosses it, and if it has not landed by then it is gone for good. `step` commits the todos currently in `round.json` atomically together with the interval retirement. If you hold everything until the end to write it, a crash midway loses that batch's todos permanently while coverage has already moved past them.
 
@@ -615,19 +615,19 @@ Then run `... statemachine.py commit` with the Bash tool.
 
 Among the fields `COMMITTED` returns, besides `shouldAnnounceBacklog` used in step 5 and `configStatus` / `configAlertStillOwed` explained in step 1, the following are also worth watching.
 
-- `shouldOpenTodoList` is what step 7 follows to decide whether to open the 待辦清單. Do not recompute it yourself
+- `shouldOpenTodoList` is what step 7 follows to decide whether to open the task list. Do not recompute it yourself
 - `newTodosThisRound` is how many todos this round added. It may go into the push, but it is not the basis for opening the window
-- `filedFromPushThisRound` is how many of the messages pushed this round were put into 待分類 because they had no matching todo. It is purely informational. **Do not send an extra push because it is nonzero**, since those messages were already pushed this round
-- `untriaged` / `triagedThisRound` are how many items 待分類 still holds and how many the user graded this round. Purely informational
-- `followedThisRound` is how many items the user moved into or out of 追蹤中 (following) this round. Purely informational
+- `filedFromPushThisRound` is how many of the messages pushed this round were put into "To triage" because they had no matching todo. It is purely informational. **Do not send an extra push because it is nonzero**, since those messages were already pushed this round
+- `untriaged` / `triagedThisRound` are how many items "To triage" still holds and how many the user graded this round. Purely informational
+- `followedThisRound` is how many items the user moved into or out of "Following up" this round. Purely informational
 - `archiveBlocked` / `restoreBlocked` / `triageBlocked` / `followBlocked` all four mean something the user clicked in the GUI did not get done. A non-empty string is the reason, and an empty string means nothing is wrong. **Do not miss a single one.** Handle them all the same way, per the table below
 
 | Field | What the user clicked | The symptom they see |
 |---|---|---|
-| `archiveBlocked` | Ticked done, or clicked 封存 (archive) in 待分類 or 追蹤中 | Ticked items never disappear |
-| `restoreBlocked` | Clicked 復原 (restore) in 已封存 (archived) | Two kinds, depending on the string. `restore file unreadable` or `archive unreadable` means it exited before acting, so **nothing happened** and the click had no effect. `archive not writable` means the item **is already back in 待辦** and only the 已封存 copy was not cleared, so the same message shows in both sections |
-| `triageBlocked` | Picked 緊急 (urgent), 重要 (important) or 普通 (normal) in 待分類, or clicked 重新分類 (reclassify) on the 待辦清單 | The screen keeps showing 「已排定」, and after the next round it is still not written in |
-| `followBlocked` | Clicked 轉追蹤 (move to following) or, on a red row, 「天後提醒」 (remind after N days) on the 待辦清單, or clicked 回到待辦 (back to todo) in 追蹤中 | The screen keeps showing 「已排定追蹤」, 「已排定回到待辦」 or 「N 天後提醒 已排定」, and after the next round it is still not written in |
+| `archiveBlocked` | Ticked done, or clicked "Archive" in "To triage" or "Following up" | Ticked items never disappear |
+| `restoreBlocked` | Clicked "Restore" in "Archived" | Two kinds, depending on the string. `restore file unreadable` or `archive unreadable` means it exited before acting, so **nothing happened** and the click had no effect. `archive not writable` means the item **is already back on the task list** and only the "Archived" copy was not cleared, so the same message shows in both sections |
+| `triageBlocked` | Picked "Urgent", "Important" or "Normal" in "To triage", or clicked "Re-triage" on the "Todo list" | The screen keeps showing "queued", and after the next round it is still not written in |
+| `followBlocked` | Clicked "Follow up" or, on a red row, the remind button ("days, then remind") on the "Todo list", or clicked "Back to todo" in "Following up" | The screen keeps showing "Follow-up queued", "Return to todo queued" or a reminder in N days marked "queued", and after the next round it is still not written in |
 
 **Treat all four as "this round did not finish", and do not assert whether it will fix itself.** One string covers two fates. `archive not writable` may mean another round changed the archive file at the same time and this one lost the version check (temporary), or that the file truly cannot be written (it will not fix itself). **The return value cannot tell which, and you must not guess.** Appearing several rounds in a row only means it is worth a look, not that the latter is confirmed, because each round losing a version check on its own also prints the exact same string. Relay it to the user as it is and let them decide whether to investigate.
 
@@ -636,11 +636,11 @@ For a non-empty string, append that sentence to the end of the push to tell the 
 
 A nonzero `itemsMissingId` is almost always caused by some earlier round leaving out `id` in its report. Such items can never be deduped by id, ticked done or fetched back to read, so they just sit stuck in the queue. So the real point is **prevention**. See the rule above that every entry must carry the Gmail message `id`.
 
-### 7. Open the task list when 待分類 has items
+### 7. Open the task list when To triage has items
 
 When `commit` returns `shouldOpenTodoList` as `true`, run the `open-task-list.ps1` command from The task list GUI section. When it is `false`, **do not open it**, and do not recompute the condition yourself.
 
-There is only one condition, that 待分類 still holds ungraded mail, whether it came in this round or earlier. Ungraded mail does not leave that section by itself, so if the user does not handle it, the list opens again every round, and that is what the user wants. There is currently no quiet period, so the early-morning round opens it too if there is anything. Report `newTodosThisRound` and `untriaged` as they are, but do not use them to decide on your own.
+There is only one condition, that "To triage" still holds ungraded mail, whether it came in this round or earlier. Ungraded mail does not leave that section by itself, so if the user does not handle it, the list opens again every round, and that is what the user wants. There is currently no quiet period, so the early-morning round opens it too if there is anything. Report `newTodosThisRound` and `untriaged` as they are, but do not use them to decide on your own.
 
 That command is fire-and-forget. Do not wait for it, do not read its output, and do not retry because it failed. **When port 8765 is already in use, it exits at once by itself, no matter who holds the port.** It only tests whether the port answers and does not identify who is on the other end. In the vast majority of cases that is the page the user already has open, which refreshes itself every 30 seconds and will see this round's new todos automatically. But if some other program holds it, this round simply opens no window, and you still must not retry or launch it another way.
 
@@ -652,38 +652,38 @@ Drift happens because each of these cases reads like its opposite, so every entr
 
 | Mail | Ruling | Dividing line |
 |---|---|---|
-| A bank's credit card statement notice | **Is a 待辦 (todo)** | A bill asks for something not yet done. The mail stating no amount or deadline does not change that. The next action is to log in, look and pay. Do not exclude it because it reads like a transaction record |
-| Pre-event reminder for Tesla Supercharging Your Resume Workshop | **Is a 待辦, but check the calendar first** | Having registered equals having committed. If it is already on the calendar, do not create a 待辦. What the user wants is to catch what is missing. Do not exclude it because it reads like event promotion or like a registration confirmation |
-| A volunteer team's 「煩請補交 Facebook 連結」, opening with `Hi Hsiao Ming` | **Not a 待辦, no push notification** | The greeting is someone else's name. That task is someone else's to do. Do not handle it as 「待確認」 (to be confirmed). Close it outright |
-| 「【行前通知】9/12 Taiwan Tech Summit 志工訓練」 from `Volunteer TaiwanNext <volunteer@taiwannext.org>`, opening with `Dear Taiwan Next Volunteers` | **Is a 待辦**, and the action is filling in the training registration form, not attending | Ruled on 2026-09-10. The original judgement of not important was wrong. Three dividing lines. One, **the word 「行前通知」 by itself means the user has already agreed to go**, since such mail presupposes the recipient is on the list. Two, `Dear ... Volunteers` is **a group greeting, not someone else's name**, unlike the `Hi Hsiao Ming` mail in the row above, and a group greeting is not evidence for exclusion. Three, the snippet is cut off right after the date, time and place, so **the thing to do comes later and cannot be seen**, and therefore mail like this must not be closed from the snippet. The user's own words were 「行前通知代表這是我會參加的活動，所以這其實是我要注意的事情」 |
+| A bank's credit card statement notice | **Is a todo** | A bill asks for something not yet done. The mail stating no amount or deadline does not change that. The next action is to log in, look and pay. Do not exclude it because it reads like a transaction record |
+| Pre-event reminder for Tesla Supercharging Your Resume Workshop | **Is a todo, but check the calendar first** | Having registered equals having committed. If it is already on the calendar, do not create a todo. What the user wants is to catch what is missing. Do not exclude it because it reads like event promotion or like a registration confirmation |
+| A volunteer team's 「煩請補交 Facebook 連結」, opening with `Hi Hsiao Ming` | **Not a todo, no push notification** | The greeting is someone else's name. That task is someone else's to do. Do not handle it as 「待確認」 (to be confirmed). Close it outright |
+| 「【行前通知】9/12 Taiwan Tech Summit 志工訓練」 from `Volunteer TaiwanNext <volunteer@taiwannext.org>`, opening with `Dear Taiwan Next Volunteers` | **Is a todo**, and the action is filling in the training registration form, not attending | Ruled on 2026-09-10. The original judgement of not important was wrong. Three dividing lines. One, **the word 「行前通知」 by itself means the user has already agreed to go**, since such mail presupposes the recipient is on the list. Two, `Dear ... Volunteers` is **a group greeting, not someone else's name**, unlike the `Hi Hsiao Ming` mail in the row above, and a group greeting is not evidence for exclusion. Three, the snippet is cut off right after the date, time and place, so **the thing to do comes later and cannot be seen**, and therefore mail like this must not be closed from the snippet. The user's own words were 「行前通知代表這是我會參加的活動，所以這其實是我要注意的事情」 |
 | Application rejection letter | **Not important** | There is no next action, and it cannot change the outcome. A rejection written personally by a real person is likewise not notified |
 | Sign-in from some location, sign-in from a new device, confirm 「這是你嗎」 | **Not important** | Location alerts keep coming, in high volume, and are done once read. But a setting that has already been changed without the user having done it must be notified |
 | Handshake job alert pushes with the user's name in the subject | **Not important** | Marketing mail personalizes too. The name only identifies the recipient and is not an importance signal |
-| The ServiceNow Early in Career Recruiting Kick Offs invitation from `Lauren Martinez via Handshake` | **Is a 待辦** | Ruled on 2026-09-17. The original judgement of not important was wrong. Any **recruiting event the employer runs itself** is classed as important and goes into 待辦, **without the user having to register first**, and neither an opening of `Hi there` that names no one nor a Register link counts toward exclusion. The dividing line is who runs it. One the employer runs itself counts, and solicitation by a third-party career fair organizer is still excluded. Being forwarded through Handshake does not matter, since the platform is only the delivery channel. The user's own words were 「只要判斷是招募的活動，就應該要歸類到重要的郵件，然後進待辦清單」 |
+| The ServiceNow Early in Career Recruiting Kick Offs invitation from `Lauren Martinez via Handshake` | **Is a todo** | Ruled on 2026-09-17. The original judgement of not important was wrong. Any **recruiting event the employer runs itself** is classed as important and goes into the task list, **without the user having to register first**, and neither an opening of `Hi there` that names no one nor a Register link counts toward exclusion. The dividing line is who runs it. One the employer runs itself counts, and solicitation by a third-party career fair organizer is still excluded. Being forwarded through Handshake does not matter, since the platform is only the delivery channel. The user's own words were 「只要判斷是招募的活動，就應該要歸類到重要的郵件，然後進待辦清單」 |
 | Share notification from `<某個人名> (Canva) <no-reply@canva.com>` | **Not important, no push notification** | In essence it says you gained a view or edit permission, and there is nothing to do. **The sender is not a real person.** The display name has a person's name but the address is `no-reply@`, and the sender is always judged by the actual address. If a real person sends the same share notification from their own mailbox, that counts as important and must be notified |
-| A bank's monthly consolidated statement | **Is a 待辦** | The user will check whether the accounts are in order, so the action is to go through it once. The reason differs from a payment bill, but it is a 待辦 all the same |
+| A bank's monthly consolidated statement | **Is a todo** | The user will check whether the accounts are in order, so the action is to go through it once. The reason differs from a payment bill, but it is a todo all the same |
 | A card issuer's secure message center 「有新訊息請登入查看」 | **Not yet ruled, rules deliberately unchanged** | The user said this one is indeed important, but is unsure whether future mail with similar content will all be important, so no rule is set yet, and the decision waits until more samples accumulate. **Do not add a rule on your own, and do not file it under any existing category. For what to do before a ruling, see Cases not yet ruled on below** |
-| Mail carrying a one-time verification code | **Not important, no push notification** | Ruled on 2026-09-22. The user deals with it on the spot, and the code expires in minutes while the schedule may take as long as 8 hours 15 minutes to see it, so any 待辦 created from it is always dead. **The dividing line is code versus link.** A verification link is still a 待辦 as before, and when one mail gives both, treat it as a link. Notices that an account was actually changed are unaffected by this and are still notified. The user's own words were 「如果是有驗證碼 我覺得算例外 因為我通常當下就會處理 可以算在已處理裡面」 |
-| 「Thank You For Attending the Career Symposium!」 from Career Development Silicon Valley, whose body asks you to fill in a five-minute survey | **Not important, does not go into 待辦, no push notification** | Ruled on 2026-09-24. The original judgement of 待辦 was wrong. Feedback forms do not go into 待辦, even when they come from the school and even when the user attended that event. **The exception stops at feedback forms.** Registration forms, requests to submit missing documents, attendance replies and any other form are still a 待辦. The user's own words were 「如果是 fill out survey 可以不用加到 代辦事項」, later adding 「不用加到代辦事項的表單只有意見回饋表單」 |
+| Mail carrying a one-time verification code | **Not important, no push notification** | Ruled on 2026-09-22. The user deals with it on the spot, and the code expires in minutes while the schedule may take as long as 8 hours 15 minutes to see it, so any todo created from it is always dead. **The dividing line is code versus link.** A verification link is still a todo as before, and when one mail gives both, treat it as a link. Notices that an account was actually changed are unaffected by this and are still notified. The user's own words were 「如果是有驗證碼 我覺得算例外 因為我通常當下就會處理 可以算在已處理裡面」 |
+| 「Thank You For Attending the Career Symposium!」 from Career Development Silicon Valley, whose body asks you to fill in a five-minute survey | **Not important, does not go into the task list, no push notification** | Ruled on 2026-09-24. The original judgement of todo was wrong. Feedback forms do not go into the task list, even when they come from the school and even when the user attended that event. **The exception stops at feedback forms.** Registration forms, requests to submit missing documents, attendance replies and any other form are still a todo. The user's own words were 「如果是 fill out survey 可以不用加到 代辦事項」, later adding 「不用加到代辦事項的表單只有意見回饋表單」 |
 
 ### Cases not yet ruled on
 
 The rows marked "Not yet ruled" in the ruling table mean **the user has deliberately not set a rule yet**, not that one was left out. But having no rule does not mean having no behaviour, so what to do in the meantime is written here.
 
-**Judge it by the ordinary actionability test, and do not treat it specially because it has not been ruled on yet.** Take the card issuer's 「有新訊息請登入查看」 as an example. It has a next action addressed to the user (log in and look), so it passes the test and becomes a 待辦. That is the expected result.
+**Judge it by the ordinary actionability test, and do not treat it specially because it has not been ruled on yet.** Take the card issuer's 「有新訊息請登入查看」 as an example. It has a next action addressed to the user (log in and look), so it passes the test and becomes a todo. That is the expected result.
 
 **Do not do these three things**
 - Do not skip it or leave it un-notified because it is not yet ruled. That would keep samples from ever accumulating, and judging from samples that actually show up is exactly what the user wants
 - Do not mark it `uncertain` or 「待確認」. That is for mail the user definitely has to act on but whose details cannot all be seen, not for mail whose rule is not set yet
 - Do not add a row to the ruling table yourself, and do not file it under an existing category
 
-This default leans toward one extra 待辦 rather than one missed mail, the same direction as the Top principle, so even if the final ruling is not important, the cost is only the user checking off a few items by hand.
+This default leans toward one extra todo rather than one missed mail, the same direction as the Top principle, so even if the final ruling is not important, the cost is only the user checking off a few items by hand.
 
 A ruling comes about when the user, looking at the task list, says directly which items were misjudged. Only then is the ruling table updated.
 
 ## The task list GUI
 
-When the user wants to view or check off 待辦, they run this themselves.
+When the user wants to view or check off todos, they run this themselves.
 
 ```
 conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\task_list\task_list_gui.py"
@@ -703,28 +703,28 @@ The string is fixed verbatim because the allowlist matches verbatim, and an unat
 
 **A scheduled run must never start it with the `conda run` form.** `conda run` waits for the child process to exit, so the whole round would hang there until the user closes the page. The script uses `Start-Process`, which does not have this problem.
 
-### 待分類 and the task list
+### To triage and the task list
 
-From top to bottom the page has four sections, 「待分類」 (untriaged), 「待辦清單」 (task list), 「追蹤中」 (following up) and 「已封存」 (archived). Before 2026-09-27 there was also a section 「重要事項」 (important items), holding mail that had been pushed but had no 待辦, and anything not handled there was swept into 已封存 automatically in the next round. The user worried that things would be cleared before they had a chance to look, so it was changed to the current design, where nothing leaves 「待分類」 by itself.
+From top to bottom the page has four sections, "To triage", "Todo list", "Following up" and "Archived". Before 2026-09-27 there was also a section for important items, holding mail that had been pushed but had no todo, and anything not handled there was swept into "Archived" automatically in the next round. The user worried that things would be cleared before they had a chance to look, so it was changed to the current design, where nothing leaves "To triage" by itself.
 
-- **待分類** is mail not yet given a level. Mail you judged to be a 待辦, and mail that was pushed but has no matching 待辦, both land here first. Each row has four buttons, 「緊急」 (urgent), 「重要」 (important), 「普通」 (normal) and 「封存」 (archive). Anything not given a level just stays, and is still there in the next round
-- **待辦清單** holds what has been given a level, sorted by 緊急, 重要, 普通, and within one level by due date. Each row has only the 「已完成」 (done) checkbox and two buttons, 「轉追蹤」 (move to following up) and 「重新分類」 (reclassify). The three level buttons are deliberately left out to avoid mis-clicks. 「重新分類」 sends it back to 「待分類」
-- **追蹤中** (following up) holds items where the user has done their own step and is waiting for the other side to respond. Items arrive from 待辦清單 via 「轉追蹤」 and keep their original level. Each row has two buttons, 「回到待辦」 (back to 待辦) and 「封存」. 「回到待辦」 returns it to its original level. A row that has been here for three full days without being handled comes due and moves back to 待辦清單 at its original level, marked red. There the red row offers 「天後提醒」 (remind in N days) in place of 「轉追蹤」, which sends it back to 追蹤中 until that day. Only the page moves it, so `state.json` and the commit output do not change when a row comes due. **Coming due does not cause the task list to open, and do not push a notification for it**
-- **已封存** holds what was checked off as done or archived directly. It is cleared after three days, and until then it can be 「復原」 (restored). An item with a level returns to its original level, one archived from 「追蹤中」 returns to 待辦清單 rather than 追蹤中, one archived without a level returns to 「待分類」, and old mail archived before 2026-09-27 is always treated as 「普通」
+- **To triage** is mail not yet given a level. Mail you judged to be a todo, and mail that was pushed but has no matching todo, both land here first. Each row has four buttons, "Urgent", "Important", "Normal" and "Archive". Anything not given a level just stays, and is still there in the next round
+- **Todo list** holds what has been given a level, sorted by Urgent, Important, Normal, and within one level by due date. Each row has only the "Done" checkbox and two buttons, "Follow up" and "Re-triage". The three level buttons are deliberately left out to avoid mis-clicks. "Re-triage" sends it back to "To triage"
+- **Following up** holds items where the user has done their own step and is waiting for the other side to respond. Items arrive from the todo list via "Follow up" and keep their original level. Each row has two buttons, "Back to todo" and "Archive". "Back to todo" returns it to its original level. A row that has been here for three full days without being handled comes due and moves back to the todo list at its original level, marked red. There the red row offers the remind button ("days, then remind") in place of "Follow up", which sends it back to "Following up" until that day. Only the page moves it, so `state.json` and the commit output do not change when a row comes due. **Coming due does not cause the task list to open, and do not push a notification for it**
+- **Archived** holds what was checked off as done or archived directly. It is cleared after three days, and until then it can be brought back with "Restore". An item with a level returns to its original level, one archived from "Following up" returns to the todo list rather than "Following up", one archived without a level returns to "To triage", and old mail archived before 2026-09-27 is always treated as "Normal"
 
-Only the user can set the level. **Any `priority`, `followSince` or `followRemindAt` written into `todos` in `round.json` is dropped by the script anyway, so do not write them.** Your only job is to fill in the `from` / `subject` / `summary` of `important` and the `todos` as usual. At the 2026-09-27 switchover, the 待辦 already on the list and the mail in 「重要事項」 were all converted to 「普通」.
+Only the user can set the level. **Any `priority`, `followSince` or `followRemindAt` written into `todos` in `round.json` is dropped by the script anyway, so do not write them.** Your only job is to fill in the `from` / `subject` / `summary` of `important` and the `todos` as usual. At the 2026-09-27 switchover, the todos already on the list and the mail in the important-items section were all converted to "Normal".
 
 The division of writers is the core of this design. Do not break it.
 - `state.json` is written only by statemachine, and the GUI only reads it
 - `tasks-archive.json` is written only by statemachine, and the GUI only reads it
-- `tasks-checked.json` (checked off as done, and 封存 from 「待分類」) is written only by the GUI, and statemachine only reads it
-- `tasks-restore.json` (復原 from 已封存) is written only by the GUI, and statemachine only reads it
-- `tasks-triage.json` (assigning a level, and 重新分類) is written only by the GUI, and statemachine only reads it
-- `tasks-follow.json` (轉追蹤, 回到待辦 and 天後提醒 (remind in N days)) is written only by the GUI, and statemachine only reads it
+- `tasks-checked.json` (checked off as done, and "Archive" from "To triage") is written only by the GUI, and statemachine only reads it
+- `tasks-restore.json` ("Restore" from "Archived") is written only by the GUI, and statemachine only reads it
+- `tasks-triage.json` (assigning a level, and "Re-triage") is written only by the GUI, and statemachine only reads it
+- `tasks-follow.json` ("Follow up", "Back to todo" and the remind button) is written only by the GUI, and statemachine only reads it
 
 The last four are commands the user issues on a row. **You must never write any of these four files.** They stand for "the user says it is done", "the user says pull it back", "the user says this mail is this level" and "the user says this is waiting on the other side". The scheduled LLM has no standing to declare these four things on the user's behalf, and the permission settings file also blocks edits to these four files.
 
-Each file has only one writing **component**, and together with atomic file replacement, a reader always sees either the complete old file or the complete new file. Letting both the GUI and statemachine write the same file would cause a lost update, and what gets overwritten could be exactly the new 待辦 this round just produced.
+Each file has only one writing **component**, and together with atomic file replacement, a reader always sees either the complete old file or the complete new file. Letting both the GUI and statemachine write the same file would cause a lost update, and what gets overwritten could be exactly the new todos this round just produced.
 
 **This division stops the GUI and statemachine from clobbering each other, not scheduled runs from clobbering each other.** `state.json` and `tasks-archive.json` each have statemachine as their only writing component, but that component may have two scheduled processes running at once, so each file is additionally guarded by its own rev check. **What happens after a loss differs between the two files, so do not conflate them.**
 
@@ -740,7 +740,7 @@ The two scheduled tasks share one state, and nothing at the instruction level ca
 
 **"Abandoning the whole round" refers to the one call that aborted, not to everything that round did.** Every earlier successful `step` has already atomically saved its own batch of findings together with the retirement of its interval, and the abort does not roll them back, nor does it need to, because that mail has already landed. The only thing actually kept for rescanning is the batch at the moment of the abort, whose interval was deliberately not retired. This is the same reasoning as for `FINDINGS_UNREADABLE` and `NO_ROUND_IN_PROGRESS`.
 
-**But the rev check is detection, not a lock, and the remaining window has not been eliminated.** A few microseconds still separate its reading of the disk rev from its writing of the file, and if two rounds land in those microseconds together there is still a lost update, and what gets overwritten is the entire state the earlier round saved, including its 待辦 for intervals that the later-writing round has already marked retired, so nothing scans those intervals again. In that case **mail is missed**, so do not claim any more that the worst case is only a duplicate notification. The probability is extremely low and the cost extremely high. This risk is accepted for now. A real fix would need a file lock, which is not being handled yet.
+**But the rev check is detection, not a lock, and the remaining window has not been eliminated.** A few microseconds still separate its reading of the disk rev from its writing of the file, and if two rounds land in those microseconds together there is still a lost update, and what gets overwritten is the entire state the earlier round saved, including its todos for intervals that the later-writing round has already marked retired, so nothing scans those intervals again. In that case **mail is missed**, so do not claim any more that the worst case is only a duplicate notification. The probability is extremely low and the cost extremely high. This risk is accepted for now. A real fix would need a file lock, which is not being handled yet.
 
 The main query does not scan Spam or Trash. If mail from a recruiter or the school is misjudged as spam by Gmail, this procedure cannot see it.
 

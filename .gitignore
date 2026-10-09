@@ -20,10 +20,12 @@ Email_Check/config.json
 Email_Check/__pycache__/
 
 # Task list runtime data: the archive the state machine writes, plus the
-# checked / restore / promote requests the viewer writes for it to consume.
+# checked / restore / triage / follow requests and the link cache the viewer
+# writes.
 # All of it carries real mail subjects and senders. Matched by extension
 # rather than by name so that a request file added later cannot leak by being
-# forgotten here; task_list_gui.py is the only tracked file in that folder.
+# forgotten here; task_list_gui.py is the only tracked file directly in that
+# folder. The pattern stops there, so the page's locales/*.json stay tracked.
 Email_Check/task_list/*.json
 Email_Check/task_list/.gui.*.tmp
 Email_Check/task_list/.sm.*.tmp

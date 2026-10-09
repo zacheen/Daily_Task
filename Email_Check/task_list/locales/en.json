@@ -1,0 +1,83 @@
+{
+  "_comment": "Copy this file to add a page language. language must equal report_language in shared/skill_deploy.toml, ignoring case. A string may be {\"one\": ..., \"other\": ...}, picked by whether {n} is 1. A key a locale leaves out falls back to this file.",
+  "language": "English",
+  "htmlLang": "en",
+  "strings": {
+    "title": "Gmail todos",
+    "loading": "Loading",
+    "secNew": "To triage",
+    "secOld": "Todo list",
+    "secFollow": "Following up",
+    "secArch": "Archived",
+    "expand": "Show",
+    "collapse": "Hide",
+    "serverGone": "Cannot load the list, the server has stopped. Restart task_list_gui.py",
+    "summary": "{waiting} to triage, {open} to do, {watching} following up",
+    "summaryDone": ", {done} queued for archive",
+    "foot": {
+      "one": "Triage, ticks, follow-ups and archiving take effect at the next scheduled round, and can be undone until then. A follow-up waiting 1 day turns red and moves back to the todo list, where you can choose when to be reminded again. {archived} archived.",
+      "other": "Triage, ticks, follow-ups and archiving take effect at the next scheduled round, and can be undone until then. A follow-up waiting {n} days turns red and moves back to the todo list, where you can choose when to be reminded again. {archived} archived."
+    },
+    "emptyNew": "No mail to triage",
+    "emptyOld": "Nothing to do",
+    "emptyFollow": "Nothing being followed up",
+    "urgent": "Urgent",
+    "important": "Important",
+    "normal": "Normal",
+    "saving": "Saving",
+    "saved": "Saved",
+    "notSaved": "Not saved",
+    "archCount": {
+      "one": "{count}, cleared after 1 day",
+      "other": "{count}, cleared after {n} days"
+    },
+    "archNone": "None",
+    "archEmpty": "No archived items",
+    "received": "Received {when}",
+    "mailbox": "To {mailbox}",
+    "direct": "direct",
+    "directTitle": "Sent straight to the forwarding hub without passing through another mailbox, so the original is only in this account",
+    "archLeftSoon": "Clearing soon",
+    "archLeft": {
+      "one": "1 day left",
+      "other": "{n} days left"
+    },
+    "restore": "Restore",
+    "restoreQueued": "Restore queued",
+    "restoreNoId": "This item has no message id and cannot be restored",
+    "working": "Working",
+    "restoreFailed": "Restore failed",
+    "count": "{n}",
+    "noSubject": "(no subject)",
+    "openMailTitle": "Opens the mail in the mailbox that received it, so a reply goes out from there",
+    "outlookTitle": "Copies the search and opens Outlook. Press Ctrl+V in the search box, then Enter",
+    "outlookCopied": "Search copied. Paste it into the Outlook search box and press Enter",
+    "outlookCopyFailed": "Copy failed, search by hand for {query}",
+    "queued": "queued",
+    "due": "Due {date}",
+    "uncertain": "Unconfirmed, open the mail yourself",
+    "noId": "No id, cannot act on it",
+    "followQueued": "Follow-up queued",
+    "backQueued": "Return to todo queued",
+    "followDays": {
+      "one": "Following up 1 day",
+      "other": "Following up {n} days"
+    },
+    "followToday": "Following up since today",
+    "followDue": ", due",
+    "remindIn": {
+      "one": ", reminder in 1 day",
+      "other": ", reminder in {n} days"
+    },
+    "archiveQueued": "Archive queued",
+    "cancel": "Cancel",
+    "archive": "Archive",
+    "back": "Back to todo",
+    "done": "Done",
+    "noIdTick": "This item has no message id and cannot be ticked",
+    "remindTitle": "Days until the next reminder",
+    "remind": "days, then remind",
+    "follow": "Follow up",
+    "retriage": "Re-triage"
+  }
+}

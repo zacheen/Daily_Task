@@ -814,8 +814,8 @@ check("the reason never lands on State, which is only what state.json holds",
 
 sm.emit = prior_emit
 
-# --- the todo list opens whenever 待分類 holds something ---
-# Nothing leaves 待分類 on its own, so a round keeps opening the list until the
+# --- the todo list opens whenever triage holds something ---
+# Nothing leaves triage on its own, so a round keeps opening the list until the
 # user files what is there. A filed or id-less todo does not hold it open.
 held = []
 was_emit = sm.emit
@@ -1146,8 +1146,8 @@ check("sequential purge drops only the expired entry",
       and [a["id"] for a in _read_arch()] == ["N2"], _read_arch())
 _clear(sm.CHECKED_PATH, sm.RESTORE_PATH)
 
-# --- migration: state from before triage lands with everything as 普通 ---
-# The user's call for existing mail. The old 重要事項 queue is folded into the
+# --- migration: state from before triage lands with everything as Normal ---
+# The user's call for existing mail. The old important-items queue is folded into the
 # list rather than dropped, since nothing else still shows those mails.
 _clear(sm.ARCHIVE_PATH, sm.CHECKED_PATH, sm.RESTORE_PATH, sm.TRIAGE_PATH)
 nid = lambda q: sorted(str(x.get("id")) for x in q)
@@ -1160,12 +1160,12 @@ legacy = sm.State({"horizon": 100, "roundSeq": 40,
                                 "noticedAt": 5},
                                {"id": "dup", "summary": "pushed", "noticedRound": 39}]})
 legacy.migrate_triage(NOW)
-check("every todo already on the list becomes 普通",
+check("every todo already on the list becomes Normal",
       all(t["priority"] == "normal" for t in legacy.todos), legacy.todos)
 check("a waiting notice joins the list instead of vanishing",
       nid(legacy.todos) == ["dup", "n1", "t1"], legacy.todos)
 n1 = [t for t in legacy.todos if t["id"] == "n1"][0]
-check("with the toast's summary as its action, and as 普通",
+check("with the toast's summary as its action, and as Normal",
       n1["action"] == "reply by Friday" and n1["priority"] == "normal", n1)
 check("and without the notice's own clock",
       "noticedRound" not in n1 and "noticedAt" not in n1, n1)
@@ -1191,11 +1191,11 @@ check("and the old notices key is not written back", "notices" not in saved, lis
 check("while the migration stamp is", saved.get("triageSince") == NOW, saved.get("triageSince"))
 _clear(sm.STATE_PATH)
 first_state, first = sm.State.load_or_init(NOW)
-check("a first run starts already migrated, so its todos wait in 待分類",
+check("a first run starts already migrated, so its todos wait in triage",
       first is True and first_state.triageSince == NOW, first_state.triageSince)
 
-# --- pushed mail with no todo waits in 待分類 like everything else ---
-# It used to become a 重要事項 notice that the next round swept away unseen.
+# --- pushed mail with no todo waits in triage like everything else ---
+# It used to become an important-items notice that the next round swept away unseen.
 st41 = sm.State({"horizon": 100, "roundSeq": 41, "triageSince": 1,
                  "todos": [{"id": "old", "action": "from round 40", "priority": "normal"}]})
 made = st41.pushed_as_todos(
@@ -1213,11 +1213,11 @@ check("an omitted field is not erased", m1["subject"] == "recruiter reply", m1)
 check("the toast's summary is what it shows as the action",
       m1["action"] == "reply by Friday", m1)
 check("another queue's clock does not follow it in", "firstDeferredRound" not in m1, m1)
-check("and it carries no level, so it lands in 待分類", "priority" not in m1, m1)
+check("and it carries no level, so it lands in triage", "priority" not in m1, m1)
 check("the list itself is untouched until reconcile_todos runs",
       nid(st41.todos) == ["old"], st41.todos)
 
-# --- end to end: a push this round waits in 待分類, a tick still wins ---
+# --- end to end: a push this round waits in triage, a tick still wins ---
 _clear(sm.ARCHIVE_PATH, sm.CHECKED_PATH, sm.RESTORE_PATH, sm.TRIAGE_PATH)
 st50 = sm.State({"horizon": 100, "roundSeq": 50, "triageSince": 1,
                  "pendingNotify": [{"id": "e1", "subject": "statement",
@@ -1240,7 +1240,7 @@ check("with the text the toast used, and no level",
 check("and clears it from pendingNotify", a50["pendingNotify"] == [], a50["pendingNotify"])
 check("a ticked todo is archived, never put back", "tick1" in nid(_read_arch()),
       _read_arch())
-check("the round asks for the list to open, because 待分類 is not empty",
+check("the round asks for the list to open, because triage is not empty",
       held[-1]["shouldOpenTodoList"] is True and held[-1]["untriaged"] == 1
       and held[-1]["filedFromPushThisRound"] == 1, held[-1])
 _clear(sm.CHECKED_PATH, sm.ARCHIVE_PATH)
@@ -1276,7 +1276,7 @@ _clear(sm.ARCHIVE_PATH)
 # --- a push and a tick landing in the same round ---
 # A retry can genuinely succeed this round while the user ticks the same
 # message between begin and commit. Without the filter the message would be
-# archived and handed straight back to 待分類 in the same commit.
+# archived and handed straight back to triage in the same commit.
 _clear(sm.ARCHIVE_PATH, sm.CHECKED_PATH, sm.RESTORE_PATH, sm.TRIAGE_PATH)
 st58 = sm.State({"horizon": 100, "roundSeq": 58, "triageSince": 1,
                  "pendingNotify": [{"id": "Z", "summary": "retry finally worked"}],
@@ -1309,7 +1309,7 @@ json.dump({"levels": {"a": "urgent", "b": "", "c": "urgent", "d": "someday",
 changed70, err70 = st70.consume_triage()
 lv70 = {t.get("id"): t.get("priority") for t in st70.todos}
 check("a level files the todo", lv70["a"] == "urgent", lv70)
-check("an empty level sends it back to 待分類",
+check("an empty level sends it back to triage",
       "priority" not in [t for t in st70.todos if t.get("id") == "b"][0], st70.todos)
 check("an unknown level is ignored rather than stored", lv70["d"] is None, lv70)
 check("the count is only what actually changed", (changed70, err70) == (2, ""),
@@ -1351,12 +1351,12 @@ sm.emit = _was73
 a73 = json.load(open(sm.STATE_PATH, encoding="utf-8"))
 check("commit writes the user's level into state.json",
       a73["todos"][0].get("priority") == "important", a73["todos"])
-check("and reports it, with nothing left in 待分類 to open the list for",
+check("and reports it, with nothing left in triage to open the list for",
       (held[-1]["triagedThisRound"], held[-1]["triageBlocked"], held[-1]["untriaged"],
        held[-1]["shouldOpenTodoList"]) == (1, "", 0, False), held[-1])
 _clear(sm.TRIAGE_PATH)
 
-# --- 追蹤中 is a stamp beside the level, never a level of its own ---
+# --- follow-up is a stamp beside the level, never a level of its own ---
 _clear(sm.FOLLOW_PATH, sm.TRIAGE_PATH)
 st80 = sm.State({"horizon": 100, "roundSeq": 80, "triageSince": 1,
                  "todos": [{"id": "f", "action": "sent the form", "priority": "important"},
@@ -1372,9 +1372,9 @@ changed80, err80 = st80.consume_follow(1000)
 by80 = {t.get("id"): t for t in st80.todos}
 check("a follow stamps the round's time and keeps the level",
       (by80["f"].get("followSince"), by80["f"]["priority"]) == (1000, "important"), by80["f"])
-check("回到待辦 drops the stamp and the todo keeps the level it left with",
+check("Back to todo drops the stamp and the todo keeps the level it left with",
       "followSince" not in by80["back"] and by80["back"]["priority"] == "urgent", by80["back"])
-check("a todo with no level is refused, so it cannot hide outside 待分類",
+check("a todo with no level is refused, so it cannot hide outside triage",
       "followSince" not in by80["raw"] and st80.untriaged_count() == 1, by80["raw"])
 check("a string value is not read as a yes", "followSince" not in by80["odd"], by80["odd"])
 check("only real changes count", (changed80, err80) == (2, ""), (changed80, err80))
@@ -1398,7 +1398,7 @@ check("a postponement lands and keeps the original stamp",
       (by84["r"]["followSince"], by84["r"]["followRemindAt"]) == (500, 5000), by84["r"])
 check("one for a filed todo not yet followed starts the follow too",
       (by84["s"]["followSince"], by84["s"]["followRemindAt"]) == (1000, 6000), by84["s"])
-check("回到待辦 clears the reminder with the stamp",
+check("Back to todo clears the reminder with the stamp",
       "followSince" not in by84["t"] and "followRemindAt" not in by84["t"], by84["t"])
 check("true is never read as a reminder at second 1", "followRemindAt" not in by84["u"],
       by84["u"])
@@ -1408,7 +1408,7 @@ check("a report cannot move a reminder",
       [t["followRemindAt"] for t in st84.todos if t["id"] == "r"] == [5000], st84.todos)
 json.dump({"levels": {"r": ""}}, open(sm.TRIAGE_PATH, "w", encoding="utf-8"))
 st84.consume_triage()
-check("重新分類 clears the reminder as well",
+check("Re-triage clears the reminder as well",
       [("followRemindAt" in t) for t in st84.todos if t["id"] == "r"] == [False], st84.todos)
 _clear(sm.TRIAGE_PATH)
 
@@ -1427,7 +1427,7 @@ check("a report can neither move nor start a follow",
       by81["k"]["followSince"] == 700 and "followSince" not in by81["n"], st81.todos)
 json.dump({"levels": {"k": ""}}, open(sm.TRIAGE_PATH, "w", encoding="utf-8"))
 st81.consume_triage()
-check("重新分類 clears the stamp too, so re-filing lands in 待辦清單",
+check("Re-triage clears the stamp too, so re-filing lands in the todo list",
       "followSince" not in by81["k"] and "priority" not in by81["k"], by81["k"])
 _clear(sm.TRIAGE_PATH)
 
@@ -1455,27 +1455,27 @@ _write_archive([dict(a82, archivedAt=2000, followRemindAt=5000)])
 json.dump({"restoreIds": ["q"]}, open(sm.RESTORE_PATH, "w", encoding="utf-8"))
 st83 = sm.State({"horizon": 100, "roundSeq": 83, "triageSince": 1})
 st83.consume_restores()
-check("a todo archived from 追蹤中 is restored to 待辦清單 at its level",
+check("a todo archived from follow-up is restored to the todo list at its level",
       [(t.get("priority"), "followSince" in t, "followRemindAt" in t) for t in st83.todos]
       == [("normal", False, False)],
       st83.todos)
 _clear(sm.ARCHIVE_PATH, sm.RESTORE_PATH)
 
-# --- a restored todo comes back at its level, old untriaged mail as 普通 ---
+# --- a restored todo comes back at its level, old untriaged mail as Normal ---
 _clear(sm.ARCHIVE_PATH, sm.RESTORE_PATH)
 _write_archive([{"id": "lvl", "action": "was filed", "priority": "urgent",
                  "archivedAt": 500},
                 {"id": "old", "action": "archived before triage", "archivedAt": 500},
-                {"id": "new", "action": "archived from 待分類", "archivedAt": 2000}])
+                {"id": "new", "action": "archived from triage", "archivedAt": 2000}])
 json.dump({"restoreIds": ["lvl", "old", "new"]},
           open(sm.RESTORE_PATH, "w", encoding="utf-8"))
 st74 = sm.State({"horizon": 100, "roundSeq": 74, "triageSince": 1000})
 st74.consume_restores()
 lv74 = {t["id"]: t.get("priority") for t in st74.todos}
 check("a filed todo comes back at its own level", lv74["lvl"] == "urgent", lv74)
-check("one archived before triage existed comes back as 普通", lv74["old"] == "normal",
+check("one archived before triage existed comes back as Normal", lv74["old"] == "normal",
       lv74)
-check("one archived from 待分類 since then goes back there", lv74["new"] is None, lv74)
+check("one archived from triage since then goes back there", lv74["new"] is None, lv74)
 _clear(sm.ARCHIVE_PATH, sm.RESTORE_PATH)
 
 # --- itemsMissingId still covers every queue there is ---
@@ -1555,7 +1555,7 @@ check("correctly typed entry fields pass",
       not _shape_error({"todos": [{"id": "t1", "subject": "Pay", "deadline": "",
                                    "createdRound": 4, "uncertain": True}]}))
 # bool() is true for every non-empty string, so "false" would display as
-# 待確認 -- a wrong answer, not a crash.
+# unconfirmed -- a wrong answer, not a crash.
 check("a stringy uncertain is refused",
       _shape_error({"todos": [{"id": "t1", "uncertain": "false"}]}))
 

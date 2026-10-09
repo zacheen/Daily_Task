@@ -3,7 +3,7 @@
 test_task_list_gui.py only covers the pure helpers, so /api/archive and /api/restore
 had no net at all. That is exactly where two comments drifted out of date
 through three review rounds, because nowhere else could an assertion fail. The
-triage endpoint behind 待分類 arrives with one from the start.
+triage endpoint arrives with one from the start.
 
 Flask's test client is used rather than a real server, so nothing binds a port
 and the watchdog never runs.
@@ -12,6 +12,7 @@ and the watchdog never runs.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -37,6 +38,9 @@ tg.TRIAGE_PATH = os.path.join(work, "tasks-triage.json")
 tg.FOLLOW_PATH = os.path.join(work, "tasks-follow.json")
 tg.LINKS_PATH = os.path.join(work, "mail-links.json")
 tg.LINK_LOG_PATH = os.path.join(work, "mail-links.log")
+# Absent unless a case writes it, so the page renders the fallback rather than
+# whatever language this machine is set to.
+tg.LANGUAGE_CONFIG = os.path.join(work, "skill_deploy.toml")
 tg.app.config["TESTING"] = True
 cli = tg.app.test_client()
 # Every /api/todos starts a link lookup, which would otherwise log in to the
@@ -94,7 +98,7 @@ write(tg.STATE_PATH, {
 })
 d = cli.get("/api/todos").get_json()
 rows = by_id(d["todos"])
-check("an untriaged todo is served with no level, which is what puts it in 待分類",
+check("an untriaged todo is served with no level, which is what puts it in triage",
       rows["new1"]["priority"] == "" and rows["new2"]["priority"] == "", d["todos"])
 check("a filed todo carries its level", rows["urg1"]["priority"] == "urgent", rows["urg1"])
 check("filed rows sort by level before deadline",
@@ -123,17 +127,17 @@ check("the triage file carries a rev like the other request files",
 check("state.json is untouched, so it keeps one writer",
       "priority" not in by_id(read(tg.STATE_PATH)["todos"])["new1"])
 d = cli.get("/api/todos").get_json()
-check("the queued level is served at once, so the row leaves 待分類 on the click",
+check("the queued level is served at once, so the row leaves triage on the click",
       by_id(d["todos"])["new1"]["priority"] == "urgent", by_id(d["todos"])["new1"])
 check("and marked pending until the round writes it",
       by_id(d["todos"])["new1"]["pendingLevel"] is True, by_id(d["todos"])["new1"])
 
 r = cli.post("/api/triage", json={"id": "old1", "level": ""})
-check("重新分類 queues an empty level", r.get_json()["ok"] is True, r.get_json())
+check("Re-triage queues an empty level", r.get_json()["ok"] is True, r.get_json())
 check("and is added beside the first request, not substituted",
       read(tg.TRIAGE_PATH)["levels"] == {"new1": "urgent", "old1": ""},
       read(tg.TRIAGE_PATH))
-check("the row is served back in 待分類 at once",
+check("the row is served back in triage at once",
       by_id(cli.get("/api/todos").get_json()["todos"])["old1"]["priority"] == "")
 
 r = cli.post("/api/triage", json={"id": "new2", "level": "someday"})
@@ -169,7 +173,7 @@ check("a tick for a todo that is gone is pruned",
 check("a restore for something no longer archived is pruned",
       read(tg.RESTORE_PATH)["restoreIds"] == [], read(tg.RESTORE_PATH))
 
-# --- /api/check, which 待分類's 封存 button also uses ---
+# --- /api/check, which triage's Archive button also uses ---
 r = cli.post("/api/check", json={"id": "new2", "checked": True})
 check("ticking a live todo succeeds", r.get_json()["ok"] is True, r.get_json())
 check("the tick is on disk before the response returns",
@@ -232,7 +236,7 @@ check("restoring something already purged is refused",
 r = cli.post("/api/restore", json={})
 check("restoring with no id is a bad request", r.status_code == 400, r.status_code)
 
-# --- /api/follow and the 追蹤中 fields /api/todos serves ---
+# --- /api/follow and the follow-up fields /api/todos serves ---
 clear(tg.TRIAGE_PATH, tg.CHECKED_PATH, tg.FOLLOW_PATH)
 write(tg.STATE_PATH, {"roundSeq": 20, "todos": [
     {"id": "w1", "subject": "waiting two days", "priority": "normal",
@@ -262,7 +266,7 @@ check("a queued follow moves the row at once, with no age until the round stamps
       == (True, True, 0), rows["f1"])
 r = cli.post("/api/follow", json={"id": "w2", "follow": False})
 rows = by_id(cli.get("/api/todos").get_json()["todos"])
-check("回到待辦 moves it back at once and keeps its level",
+check("Back to todo moves it back at once and keeps its level",
       (rows["w2"]["following"], rows["w2"]["priority"], rows["w2"]["followAlert"])
       == (False, "urgent", False), rows["w2"])
 r = cli.post("/api/follow", json={"id": "u1", "follow": True})
@@ -271,7 +275,7 @@ cli.post("/api/triage", json={"id": "u1", "level": "normal"})
 r = cli.post("/api/follow", json={"id": "u1", "follow": True})
 check("but one with a queued level is accepted", r.get_json()["ok"] is True, r.get_json())
 cli.post("/api/triage", json={"id": "u1", "level": ""})
-check("重新分類 withdraws a queued follow, or it would fire once the todo is re-filed",
+check("Re-triage withdraws a queued follow, or it would fire once the todo is re-filed",
       "u1" not in read(tg.FOLLOW_PATH)["follow"], read(tg.FOLLOW_PATH))
 cli.post("/api/triage", json={"id": "u1", "level": "normal"})
 cli.post("/api/follow", json={"id": "u1", "follow": True})
@@ -281,7 +285,7 @@ r = cli.post("/api/follow", json={"id": "nope", "follow": True})
 check("following a todo that is gone is refused",
       r.status_code == 409 and r.get_json()["gone"] is True, r.get_json())
 
-# --- 天後提醒 on a due row ---
+# --- the remind button on a due row ---
 clear(tg.FOLLOW_PATH)
 write(tg.STATE_PATH, {"roundSeq": 22, "todos": [
     {"id": "red", "subject": "red", "priority": "normal", "followSince": NOW - 5 * DAY},
@@ -300,7 +304,7 @@ for bad in (0, 61, 2.5, True, "3"):
     r = cli.post("/api/remind", json={"id": "red", "days": bad})
     check(f"days={bad!r} is a bad request", r.status_code == 400, r.status_code)
 r = cli.post("/api/remind", json={"id": "plain", "days": 3})
-check("a row not in 追蹤中 cannot be postponed", r.status_code == 409, r.get_json())
+check("a row not in follow-up cannot be postponed", r.status_code == 409, r.get_json())
 before = int(time.time())
 r = cli.post("/api/remind", json={"id": "red", "days": 4})
 due_at = read(tg.FOLLOW_PATH)["follow"]["red"]
@@ -513,22 +517,20 @@ check("an Outlook search survives a reload from the cache file",
 reset_links(lambda ids: {})
 clear(tg.STATE_PATH, tg.LINKS_PATH)
 
-# --- the page: 待分類 above 待辦清單, and only 待分類 offers the levels ---
+# --- the page: triage above the todo list, and only triage offers the levels ---
 page = tg.index()
-check("both sections are in the page, 待分類 first",
-      "待分類" in page and "待辦清單" in page and page.index("待分類") < page.index("待辦清單"))
-check("the retired section names are gone",
-      not any(name in page for name in ("重要事項", "這次新增", "之前的")))
+check("the sections run triage, todo list, follow-up, archive",
+      page.index("id=secnew") < page.index("id=secold") < page.index("id=secfollow")
+      < page.index("id=secarch"))
 check("the level buttons post to the triage endpoint", "'/api/triage'" in page)
-check("the four choices are all there", all(f"'{w}'" in page for w in ("緊急", "重要", "普通"))
-      and "button('封存'" in page)
-check("the level buttons are built in one place only, which is 待分類",
+check("the four choices are all there",
+      all(f"tr('{k}')" in page for k in ("urgent", "important", "normal"))
+      and "button(tr('archive')" in page)
+check("the level buttons are built in one place only, which is triage",
       page.count("for(const [lv, name] of LEVELS)") == 1)
-check("a filed row offers 重新分類 instead", "button('重新分類'" in page)
-check("追蹤中 sits between 待辦清單 and 已封存",
-      page.index("待辦清單 <span") < page.index("追蹤中 <span") < page.index("已封存 <span"))
-check("轉追蹤 and 回到待辦 both post to the follow endpoint",
-      "button('轉追蹤'" in page and "button('回到待辦'" in page
+check("a filed row offers Re-triage instead", "button(tr('retriage')" in page)
+check("Follow up and Back to todo both post to the follow endpoint",
+      "button(tr('follow')" in page and "button(tr('back')" in page
       and page.count("'/api/follow'") == 2)
 check("the red threshold is the server's constant, not a second copy",
       "__FOLLOW_DAYS__" not in page
@@ -536,19 +538,92 @@ check("the red threshold is the server's constant, not a second copy",
 check("and so is the postponement cap",
       "__MAX_REMIND__" not in page and f"const MAX_REMIND = {tg.MAX_REMIND_DAYS};" in page)
 check("the postpone control posts to the remind endpoint", "'/api/remind'" in page)
-check("a due follow is shown in 待辦清單 rather than 追蹤中",
+check("a due follow is shown in the todo list rather than follow-up",
       "t.priority && (!t.following || t.followAlert)" in page
       and "t.following && !t.followAlert" in page)
-check("天後提醒 is built once, on the 待辦清單 row of a due follow",
-      page.count("button('天後提醒'") == 1 and "if(t.tickable && t.followAlert)" in page)
+check("the remind button is built once, on the todo list row of a due follow",
+      page.count("button(tr('remind')") == 1 and "if(t.tickable && t.followAlert)" in page)
 check("an alias mailbox is labelled rather than left looking unresolved",
-      "直收" in page and "includes('@')" in page)
+      "tr('direct')" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",
       page.count("appendSource(") == 3, page.count("appendSource("))
 check("an Outlook row copies its query synchronously in the click itself",
       "copyNow(t.outlookQuery)" in page and "document.execCommand('copy')" in page)
 check("the quick re-poll interval is the server's constant",
       "__LINK_POLL_MS__" not in page and f"setTimeout(refresh, {tg.LINK_POLL_MS})" in page)
+check("no placeholder is left for the locale",
+      "__LANG__" not in page and "__STRINGS__" not in page)
+
+# --- locales: every key the page asks for exists in every language ---
+def placeholders(value):
+    forms = value.values() if isinstance(value, dict) else [value]
+    return set().union(*(re.findall(r"\{(\w+)\}", f) for f in forms))
+
+
+# Read off the template rather than the rendered page, whose injected table
+# would otherwise count as page code.
+used = set(re.findall(r"data-t=(\w+)", tg.PAGE))
+for args in re.findall(r"\btr\(([^()]*)\)", tg.PAGE):
+    used |= set(re.findall(r"'(\w+)'", args))
+en = read(tg.FALLBACK_LOCALE)
+check("every key the page asks for is in the fallback",
+      used and not used - set(en["strings"]), sorted(used - set(en["strings"])))
+check("and the fallback carries no key the page never asks for",
+      not set(en["strings"]) - used, sorted(set(en["strings"]) - used))
+locales = {n: read(os.path.join(tg.LOCALE_DIR, n))
+           for n in sorted(os.listdir(tg.LOCALE_DIR)) if n.endswith(".json")}
+check("there is more than the fallback to choose from", len(locales) >= 2, sorted(locales))
+check("each locale names a language no other locale names",
+      len({d["language"].casefold() for d in locales.values()}) == len(locales),
+      [d["language"] for d in locales.values()])
+for name, data in locales.items():
+    strings = data["strings"]
+    check(f"{name} has exactly the fallback's keys", set(strings) == set(en["strings"]),
+          sorted(set(strings) ^ set(en["strings"])))
+    check(f"{name} has an html lang", bool(data.get("htmlLang")), data.get("htmlLang"))
+    wrong = [k for k in strings if k in en["strings"]
+             and placeholders(strings[k]) != placeholders(en["strings"][k])]
+    check(f"{name} fills the same placeholders as the fallback", not wrong, wrong)
+    plural = [k for k, v in strings.items()
+              if isinstance(v, dict) and not isinstance(v.get("other"), str)]
+    check(f"{name}'s plural entries all have an other form", not plural, plural)
+
+zh = read(os.path.join(tg.LOCALE_DIR, "zh-TW.json"))
+cases = [('report_language = "Traditional Chinese"\n', zh),
+         ('report_language = "traditional chinese "\n', zh),
+         ('report_language = "English"\n', en),
+         ('report_language = "Klingon"\n', en),
+         ('report_language = \n', en),
+         (None, en)]
+for text, want in cases:
+    clear(tg.LANGUAGE_CONFIG)
+    if text is not None:
+        with open(tg.LANGUAGE_CONFIG, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    lang, strings = tg.load_locale()
+    check(f"report_language {text!r} serves {want['language']}",
+          lang == want["htmlLang"] and strings == {**en["strings"], **want["strings"]}, lang)
+clear(tg.LANGUAGE_CONFIG)
+
+real_dir, real_fallback = tg.LOCALE_DIR, tg.FALLBACK_LOCALE
+tg.LOCALE_DIR = os.path.join(work, "locales")
+tg.FALLBACK_LOCALE = os.path.join(tg.LOCALE_DIR, "en.json")
+os.makedirs(tg.LOCALE_DIR, exist_ok=True)
+write(tg.FALLBACK_LOCALE, {"language": "English", "htmlLang": "en",
+                           "strings": {"title": "Todos", "cancel": "Cancel"}})
+write(os.path.join(tg.LOCALE_DIR, "xx.json"),
+      {"language": "Test", "htmlLang": "x\"y", "strings": {"title": "</script><b>"}})
+with open(tg.LANGUAGE_CONFIG, "w", encoding="utf-8") as fh:
+    fh.write('report_language = "Test"\n')
+lang, strings = tg.load_locale()
+check("a key the chosen locale leaves out falls back to English",
+      strings == {"title": "</script><b>", "cancel": "Cancel"}, strings)
+page = tg.index()
+check("a string cannot close the script tag it is injected into",
+      page.count("</script>") == 1 and "<\\/script><b>" in page)
+check("the html lang is escaped into its attribute", 'lang="x&quot;y"' in page)
+tg.LOCALE_DIR, tg.FALLBACK_LOCALE = real_dir, real_fallback
+clear(tg.LANGUAGE_CONFIG)
 
 shutil.rmtree(work, ignore_errors=True)
 print()

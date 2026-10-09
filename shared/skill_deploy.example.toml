@@ -1,6 +1,9 @@
 # Template for skill_deploy.toml. Copy it to skill_deploy.toml in this folder,
-# which is gitignored, and edit the copy. deploy_skills.py reads only the copy.
+# which is gitignored, and edit the copy. deploy_skills.py and the task list
+# page read only the copy.
 #
 # Settings shared by every task deploy_skills.py deploys. report_language is the
 # language of all user-facing output, not the rule files (see LANGUAGE_LINE there).
-report_language = "Traditional Chinese"
+# The task list page follows it too, through the Email_Check/task_list/locales/
+# file whose language matches, and falls back to English when none does.
+report_language = "English"

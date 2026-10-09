@@ -16,13 +16,18 @@ per file plus atomic replace, a reader always sees a complete old or complete
 new file and no lock is needed.
 
 Each request file is one verb the user can aim at a row. A tick says done, and
-待分類's and 追蹤中's 封存 are the same tick. A restore says un-archive that. A
-triage says file this todo under a level, or send it back to 待分類. A follow
-says move a filed todo to 追蹤中, or back to 待辦清單 at the level it left
-with. None of them takes effect until the next scheduled round reads it, which
-is why every button says 已排定 rather than claiming it is finished. A queued
-level or follow shows at once anyway, since the row has to move to the section
-it now belongs in.
+the Archive button of the triage and follow-up sections is the same tick. A
+restore says un-archive that. A triage says file this todo under a level, or
+send it back to triage. A follow says move a filed todo to the follow-up
+section, or back to the todo list at the level it left with. None of them
+takes effect until the next scheduled round reads it, which is why every
+button says queued rather than claiming it is finished. A queued level or
+follow shows at once anyway, since the row has to move to the section it now
+belongs in.
+
+The page's own text comes from a file in locales/, picked by report_language
+in shared/skill_deploy.toml. Comments name sections and buttons by their
+English labels.
 
 A tick is persisted on the request that carries it, not on window close, so
 killing the process cannot lose one. The page reports per-row save state
@@ -41,6 +46,7 @@ Run with
 from __future__ import annotations
 
 import datetime as dt
+import html
 import importlib.util
 import json
 import os
@@ -49,6 +55,7 @@ import socket
 import tempfile
 import threading
 import time
+import tomllib
 import webbrowser
 from urllib.parse import unquote
 
@@ -79,16 +86,28 @@ LINKS_VERSION = 3
 LINK_LOG_PATH = os.path.join(HERE, "mail-links.log")
 LINK_LOG_LINES = 200
 # Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
-# order of 待辦清單. A todo with none of these is 待分類.
+# order of the todo list. A todo with none of these is in triage.
 PRIORITIES = ("urgent", "important", "normal")
 # Mirrors ARCHIVE_TTL in statemachine.py, for showing days remaining.
 ARCHIVE_TTL_DAYS = 3
-# A 追蹤中 row this many days old comes due, since nobody has answered yet, and
-# the page shows it back in 待辦清單 marked red. Only the page moves it.
-# state.json keeps followSince, which is what lets 天後提醒 send it back.
+# A follow-up row this many days old comes due, since nobody has answered yet,
+# and the page shows it back in the todo list marked red. Only the page moves
+# it. state.json keeps followSince, which is what lets the remind button send
+# it back.
 FOLLOW_ALERT_DAYS = 3
-# Upper bound on how far 天後提醒 can push a due row out.
+# Upper bound on how far the remind button can push a due row out.
 MAX_REMIND_DAYS = 60
+# One file per page language, each naming in `language` the report_language it
+# serves.
+LOCALE_DIR = os.path.join(HERE, "locales")
+# Fills every key a matched locale leaves out, and serves the whole page when
+# none matches.
+FALLBACK_LOCALE = os.path.join(LOCALE_DIR, "en.json")
+# The setting that already picks the language the scheduled run writes in, so
+# following it keeps a row's action and the page around it in one language.
+# Gitignored, so a fresh clone that has not copied it in gets the fallback.
+LANGUAGE_CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)),
+                               "shared", "skill_deploy.toml")
 HOST, PORT = "127.0.0.1", 8765
 # Long enough for a cold browser start on a busy machine. Exceeded with no page
 # ever connecting means the browser never came up, so exit rather than idle.
@@ -263,7 +282,7 @@ def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[st
     ticked, already flagged for restore, already filed or already followed.
 
     A level or follow is dropped once state.json carries it, which is how the
-    page stops showing it as 已排定. Nothing is dropped before that, so a click
+    page stops showing it as queued. Nothing is dropped before that, so a click
     the round has not read yet cannot be lost here.
     """
     rows = [t for t in todos if isinstance(t, dict) and _usable_id(t)]
@@ -341,12 +360,51 @@ def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
     return (9999, 99, 99)
 
 
+def load_locale() -> tuple[str, dict]:
+    """The html lang and strings of the locale whose `language` equals
+    report_language, ignoring case, laid over the fallback's strings.
+
+    Read on every page load, so a changed setting shows on the next reload
+    without a restart.
+    """
+    fallback = _read_json(FALLBACK_LOCALE, {})
+    if not isinstance(fallback, dict):
+        fallback = {}
+    try:
+        with open(LANGUAGE_CONFIG, "rb") as fh:
+            wanted = str(tomllib.load(fh).get("report_language", "")).strip().casefold()
+    except (OSError, tomllib.TOMLDecodeError):
+        wanted = ""
+    chosen = fallback
+    try:
+        names = sorted(n for n in os.listdir(LOCALE_DIR) if n.endswith(".json"))
+    except OSError:
+        names = []
+    for name in names:
+        data = _read_json(os.path.join(LOCALE_DIR, name), {})
+        if wanted and isinstance(data, dict) \
+                and str(data.get("language", "")).strip().casefold() == wanted:
+            chosen = data
+            break
+    strings = {}
+    for source in (fallback, chosen):
+        if isinstance(source.get("strings"), dict):
+            strings.update(source["strings"])
+    return str(chosen.get("htmlLang") or fallback.get("htmlLang") or "en"), strings
+
+
 @app.get("/")
 def index() -> str:
+    lang, strings = load_locale()
+    # Escaped so a string holding "</script>" cannot end the script it sits in.
+    table = json.dumps(strings, ensure_ascii=False).replace("</", "<\\/")
+    # The table goes in last, so a placeholder spelled inside a string stays text.
     return (PAGE.replace("__PING_MS__", str(PING_EVERY_MS))
                 .replace("__FOLLOW_DAYS__", str(FOLLOW_ALERT_DAYS))
                 .replace("__MAX_REMIND__", str(MAX_REMIND_DAYS))
-                .replace("__LINK_POLL_MS__", str(LINK_POLL_MS)))
+                .replace("__LINK_POLL_MS__", str(LINK_POLL_MS))
+                .replace("__LANG__", html.escape(lang, quote=True))
+                .replace("__STRINGS__", table))
 
 
 def load_restores() -> set[str]:
@@ -376,7 +434,9 @@ def api_archive():
         rows.append({
             "id": aid or "",
             "restorable": aid is not None,
-            "subject": a.get("subject") or "(no subject)",
+            # Empty rather than a placeholder, which the page words in its
+            # own language.
+            "subject": a.get("subject") or "",
             "sender": a.get("from") or "",
             "mailbox": a.get("mailbox") or "",
             "received": a.get("received") or "",
@@ -416,7 +476,7 @@ def api_restore():
 
 @app.post("/api/triage")
 def api_triage():
-    """Queue a level for a todo, or "" to send it back to 待分類.
+    """Queue a level for a todo, or "" to send it back to triage.
 
     Same shape as /api/restore, a GUI-owned request file rather than a write to
     state.json, so that file keeps exactly one writer. The state machine
@@ -448,11 +508,12 @@ def api_triage():
 
 @app.post("/api/follow")
 def api_follow():
-    """Queue a move to 追蹤中 (true) or back to 待辦清單 (false).
+    """Queue a move to the follow-up section (true) or back to the todo list
+    (false).
 
     Its own request file, like /api/triage, so state.json keeps one writer. A
     todo with no level, stored or queued, is refused, because the state
-    machine refuses it too and the click would otherwise sit 已排定 forever.
+    machine refuses it too and the click would otherwise sit queued forever.
     """
     body = request.get_json(silent=True) or {}
     tid = str(body.get("id", "")).strip()
@@ -479,7 +540,7 @@ def api_follow():
 @app.post("/api/remind")
 def api_remind():
     """Postpone a followed row's reminder by a number of days from now, which
-    sends a due row from 待辦清單 back to 追蹤中.
+    sends a due row from the todo list back to the follow-up section.
 
     Queued in the follow file as the due epoch, computed here at the click so
     the wait for the next round does not stretch the delay the user typed.
@@ -507,8 +568,8 @@ def api_remind():
 
 
 def _remind_at(todo: dict) -> int | None:
-    """When a stamped 追蹤中 row comes due, or None when its stamp is unusable,
-    which keeps a bad value from moving a row out of 追蹤中."""
+    """When a stamped follow-up row comes due, or None when its stamp is
+    unusable, which keeps a bad value from moving a row out of follow-up."""
     if _is_remind_at(todo.get("followRemindAt")):
         return todo["followRemindAt"]
     try:
@@ -657,18 +718,18 @@ def api_todos():
     for t in todos:
         tid = _usable_id(t)
         stored = str(t.get("priority") or "")
-        # A queued level shows at once, so a filed row leaves 待分類 on the
+        # A queued level shows at once, so a filed row leaves triage on the
         # click instead of on the next round.
         level = levels[tid] if tid in levels else stored
         stamped = "followSince" in t
         want = follows.get(tid) if tid is not None else None
         # Same for a queued follow. The level check mirrors consume_follow,
-        # which refuses a todo with none, so no row lands in 追蹤中 unfiled.
+        # which refuses a todo with none, so no row lands in follow-up unfiled.
         following = ((want is not False) if want is not None else stamped) \
             and level in PRIORITIES
         # A queued follow has no stamp yet, so it shows no age until the round.
         days = _follow_days(t.get("followSince"), now) if following and stamped else 0
-        # A queued postponement counts at once, so a due row returns to 追蹤中
+        # A queued postponement counts at once, so a due row returns to follow-up
         # on the click rather than on the next round.
         due = want if _is_remind_at(want) else (_remind_at(t) if stamped else None)
         alert = bool(following and stamped and due is not None and now >= due)
@@ -681,7 +742,7 @@ def api_todos():
             # str(), because this is a sort key below and a non-string subject
             # would raise TypeError against a string one. statemachine refuses
             # such a todo at ingestion; this covers a hand-edited state.json.
-            "subject": str(t.get("subject") or "(no subject)"),
+            "subject": str(t.get("subject") or ""),
             **_link_fields(links.get(tid or "", "")),
             "sender": t.get("from") or "",
             "mailbox": t.get("mailbox") or "",
@@ -701,7 +762,7 @@ def api_todos():
         })
     # Level first, then a parsed date rather than the raw string, because
     # lexicographic order puts "10-2" before "9-15" and shows a later deadline
-    # as the more urgent one. 待分類 rows all rank last and the page splits them
+    # as the more urgent one. Triage rows all rank last and the page splits them
     # off, so their order is the date order alone.
     rank = {p: i for i, p in enumerate(PRIORITIES)}
     rows.sort(key=lambda r: (r["checked"], rank.get(r["priority"], len(PRIORITIES)),
@@ -750,7 +811,8 @@ def api_check():
 
 
 PAGE = """<!doctype html>
-<meta charset="utf-8"><title>Gmail 待辦</title>
+<html lang="__LANG__">
+<meta charset="utf-8"><title></title>
 <style>
  :root{color-scheme:dark}
  body{font:15px/1.55 -apple-system,"Segoe UI",system-ui,sans-serif;
@@ -814,29 +876,41 @@ PAGE = """<!doctype html>
  .foot{color:#8b9096;font-size:12px;margin-top:20px;text-align:center}
 </style>
 <div class=wrap>
-  <h1>Gmail 待辦</h1>
-  <div class=sub id=sub>載入中</div>
+  <h1 data-t=title></h1>
+  <div class=sub id=sub data-t=loading></div>
   <div class=sec id=secnew>
-    <div class=hd>待分類 <span class=n id=cntnew></span></div>
+    <div class=hd><span data-t=secNew></span> <span class=n id=cntnew></span></div>
     <div id=listnew></div>
   </div>
   <div class=sec id=secold>
-    <div class=hd>待辦清單 <span class=n id=cntold></span></div>
+    <div class=hd><span data-t=secOld></span> <span class=n id=cntold></span></div>
     <div id=listold></div>
   </div>
   <div class=sec id=secfollow>
-    <div class=hd>追蹤中 <span class=n id=cntfollow></span></div>
+    <div class=hd><span data-t=secFollow></span> <span class=n id=cntfollow></span></div>
     <div id=listfollow></div>
   </div>
   <div class=sec id=secarch>
-    <div class=hd>已封存 <span class=n id=cntarch></span>
-      <span class=tog id=togarch>展開</span></div>
+    <div class=hd><span data-t=secArch></span> <span class=n id=cntarch></span>
+      <span class=tog id=togarch data-t=expand></span></div>
     <div id=listarch class=hidden></div>
   </div>
   <div class=foot id=foot></div>
 </div>
 <script>
 const el = (t,c)=>{const e=document.createElement(t); if(c)e.className=c; return e;};
+const T = __STRINGS__;
+// A key no locale has shows as itself, so a gap is visible rather than blank.
+// A {one, other} entry picks its form by vars.n.
+function tr(key, vars){
+  let s = T[key];
+  if(s && typeof s === 'object') s = (vars && vars.n === 1 && s.one) || s.other;
+  if(typeof s !== 'string') return key;
+  for(const [k, v] of Object.entries(vars || {})) s = s.split('{' + k + '}').join(String(v));
+  return s;
+}
+for(const n of document.querySelectorAll('[data-t]')) n.textContent = tr(n.dataset.t);
+document.title = tr('title');
 const ARCH_DAYS = 3;
 const FOLLOW_DAYS = __FOLLOW_DAYS__;
 const MAX_REMIND = __MAX_REMIND__;
@@ -847,10 +921,9 @@ const CID = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()));
 async function load(){
   let d;
   try{ d = await (await fetch('/api/todos?cid='+CID)).json(); }
-  catch(e){ document.getElementById('sub').textContent =
-      '讀不到資料，伺服器已經關閉。重新啟動 task_list_gui.py'; return; }
+  catch(e){ document.getElementById('sub').textContent = tr('serverGone'); return; }
   const fresh = d.todos.filter(t=>!t.priority);
-  // A due follow is the user's move again, so it sits in 待辦清單 marked red.
+  // A due follow is the user's move again, so it sits in the todo list marked red.
   const filed = d.todos.filter(t=>t.priority && (!t.following || t.followAlert));
   // Longest wait first. The sort is stable, so ties keep the server's
   // level-then-deadline order.
@@ -861,14 +934,13 @@ async function load(){
   const watching = tracked.filter(t=>!t.checked).length;
   const done = d.todos.filter(t=>t.checked).length;
   document.getElementById('sub').textContent =
-    `${waiting} 項待分類，${open} 項待辦，${watching} 項追蹤中`
-    + (done ? `，${done} 項已排定封存` : '');
+    tr('summary', {waiting, open, watching}) + (done ? tr('summaryDone', {done}) : '');
   document.getElementById('foot').textContent =
-    `分類、勾選、追蹤或封存都在下次排程更新時才生效，在那之前都還可以反悔。追蹤滿 ${FOLLOW_DAYS} 天會標紅移回待辦清單，在那裡可以設定幾天後再提醒。已封存 ${d.archivedTotal} 項。`;
+    tr('foot', {n: FOLLOW_DAYS, archived: d.archivedTotal});
 
-  fill('listnew', 'cntnew', fresh, '沒有待分類的信', triageRow);
-  fill('listold', 'cntold', filed, '目前沒有待辦', row);
-  fill('listfollow', 'cntfollow', tracked, '沒有追蹤中的項目', followRow);
+  fill('listnew', 'cntnew', fresh, tr('emptyNew'), triageRow);
+  fill('listold', 'cntold', filed, tr('emptyOld'), row);
+  fill('listfollow', 'cntfollow', tracked, tr('emptyFollow'), followRow);
   loadArchive();
   // Links arrive from a background lookup after the list is served, so check
   // back soon rather than at the 30 s refresh.
@@ -880,7 +952,8 @@ function refresh(){
   if(!document.activeElement.classList.contains('days')) load();
 }
 
-const LEVELS = [['urgent','緊急'], ['important','重要'], ['normal','普通']];
+const LEVELS = [['urgent', tr('urgent')], ['important', tr('important')],
+                ['normal', tr('normal')]];
 
 async function post(path, payload){
   const res = await fetch(path,{method:'POST',
@@ -896,9 +969,9 @@ function button(label, action, st, cls){
   const b = el('button', cls || 'btn');
   b.textContent = label;
   b.onclick = async ()=>{
-    b.disabled = true; st.className='st saving'; st.textContent='儲存中';
+    b.disabled = true; st.className='st saving'; st.textContent=tr('saving');
     try{ await action(); await load(); }
-    catch(e){ st.className='st failed'; st.textContent='未儲存'; b.disabled = false; }
+    catch(e){ st.className='st failed'; st.textContent=tr('notSaved'); b.disabled = false; }
   };
   return b;
 }
@@ -908,7 +981,7 @@ let archOpen = false;
 document.getElementById('togarch').onclick = ()=>{
   archOpen = !archOpen;
   document.getElementById('listarch').classList.toggle('hidden', !archOpen);
-  document.getElementById('togarch').textContent = archOpen ? '收起' : '展開';
+  document.getElementById('togarch').textContent = tr(archOpen ? 'collapse' : 'expand');
 };
 
 async function loadArchive(){
@@ -918,10 +991,10 @@ async function loadArchive(){
   const list = document.getElementById('listarch');
   const items = d.archived || [];
   document.getElementById('cntarch').textContent =
-    items.length ? `${items.length} 項，${ARCH_DAYS} 天後清除` : '目前沒有';
+    items.length ? tr('archCount', {count: items.length, n: ARCH_DAYS}) : tr('archNone');
   list.textContent = '';
   if(!items.length){
-    list.append(Object.assign(el('div','none'),{textContent:'沒有已封存的項目'}));
+    list.append(Object.assign(el('div','none'),{textContent:tr('archEmpty')}));
     return;
   }
   for(const a of items) list.append(archRow(a));
@@ -933,7 +1006,7 @@ async function loadArchive(){
 // archive rows avoid appending an empty meta div.
 function appendSource(meta, item){
   if(item.received) meta.append(Object.assign(el('span','box'),
-      {textContent:'收信 ' + item.received}), document.createTextNode('  '));
+      {textContent:tr('received', {when: item.received})}), document.createTextNode('  '));
   if(item.sender) meta.append(document.createTextNode(item.sender));
   if(item.mailbox){
     const b = el('span','box');
@@ -941,9 +1014,9 @@ function appendSource(meta, item){
     // nobody forwarded. Left bare, it reads like a value that failed to
     // resolve, which is exactly what it looked like while it was one.
     const direct = !item.mailbox.includes('@');
-    b.textContent = (item.sender ? '  ' : '') + '收件 ' + item.mailbox
-                  + (direct ? ' 直收' : '');
-    if(direct) b.title = '信直接寄到轉信中心，沒有經過其他信箱，原信只在這個帳號裡';
+    b.textContent = (item.sender ? '  ' : '') + tr('mailbox', {mailbox: item.mailbox})
+                  + (direct ? ' ' + tr('direct') : '');
+    if(direct) b.title = tr('directTitle');
     meta.append(b);
   }
   return meta.childNodes.length > 0;
@@ -952,18 +1025,18 @@ function appendSource(meta, item){
 function archRow(a){
   const r = el('div','row arch');
   const body = el('div','body');
-  body.append(Object.assign(el('div','subj'),{textContent:a.subject}));
+  body.append(Object.assign(el('div','subj'),{textContent:a.subject || tr('noSubject')}));
   if(a.action) body.append(Object.assign(el('div','act'),{textContent:a.action}));
   const ameta = el('div','meta');
   if(appendSource(ameta, a)) body.append(ameta);
   const left = el('div', 'left' + (a.daysLeft <= 1 ? ' soon' : ''));
-  left.textContent = a.daysLeft <= 0 ? '即將清除' : `剩 ${a.daysLeft} 天`;
+  left.textContent = a.daysLeft <= 0 ? tr('archLeftSoon') : tr('archLeft', {n: a.daysLeft});
   const btn = el('button','btn');
-  btn.textContent = a.pending ? '已排定復原' : '復原';
+  btn.textContent = tr(a.pending ? 'restoreQueued' : 'restore');
   btn.disabled = a.pending || !a.restorable;
-  if(!a.restorable) btn.title = '這筆缺少 message id，無法復原';
+  if(!a.restorable) btn.title = tr('restoreNoId');
   btn.onclick = async ()=>{
-    btn.disabled = true; btn.textContent = '處理中';
+    btn.disabled = true; btn.textContent = tr('working');
     try{
       const res = await fetch('/api/restore',{method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -971,10 +1044,10 @@ function archRow(a){
       const j = await res.json();
       if(!j.ok) throw new Error(j.error||'failed');
       // Queued, not done -- see the module docstring on why every button
-      // says 已排定 rather than claiming it is finished.
-      btn.textContent = '已排定復原';
+      // says queued rather than claiming it is finished.
+      btn.textContent = tr('restoreQueued');
     }catch(e){
-      btn.textContent = '復原失敗'; btn.disabled = false;
+      btn.textContent = tr('restoreFailed'); btn.disabled = false;
     }
   };
   r.append(body, left, btn);
@@ -984,7 +1057,7 @@ function archRow(a){
 function fill(listId, cntId, items, emptyText, make){
   const list = document.getElementById(listId);
   list.textContent = '';
-  document.getElementById(cntId).textContent = items.length ? `${items.length} 項` : '';
+  document.getElementById(cntId).textContent = items.length ? tr('count', {n: items.length}) : '';
   if(!items.length){
     list.append(Object.assign(el('div','none'),{textContent:emptyText}));
     return;
@@ -1008,45 +1081,46 @@ function copyNow(text){
 function cardBody(t){
   const body = el('div','body');
   const subj = el('div','subj');
+  const subject = t.subject || tr('noSubject');
   if(t.link){
     const a = Object.assign(el('a'), {href:t.link, target:'_blank', rel:'noopener',
-        textContent:t.subject, title:'在原收件信箱開信，可以直接回信'});
+        textContent:subject, title:tr('openMailTitle')});
     subj.append(a);
     if(t.outlookQuery){
-      a.title = '複製搜尋條件並開啟 Outlook，在搜尋框按 Ctrl+V 再按 Enter';
+      a.title = tr('outlookTitle');
       const tip = el('span','pend');
       // The default action still opens the mailbox in the new tab.
       a.onclick = ()=>{
-        tip.textContent = copyNow(t.outlookQuery)
-          ? '  已複製搜尋條件，到 Outlook 搜尋框貼上後按 Enter'
-          : '  複製失敗，請手動搜尋 ' + t.outlookQuery;
+        tip.textContent = '  ' + (copyNow(t.outlookQuery)
+          ? tr('outlookCopied') : tr('outlookCopyFailed', {query: t.outlookQuery}));
       };
       subj.append(tip);
     }
-  }else subj.textContent = t.subject;
+  }else subj.textContent = subject;
   body.append(subj);
   if(t.action) body.append(Object.assign(el('div','act'),{textContent:t.action}));
   const meta = el('div','meta');
   if(t.priority){
     const name = (LEVELS.find(([lv])=>lv===t.priority) || [,''])[1];
     meta.append(Object.assign(el('span','lv '+t.priority),
-        {textContent: name + (t.pendingLevel ? ' 已排定' : '')}));
+        {textContent: name + (t.pendingLevel ? ' ' + tr('queued') : '')}));
   }
-  if(t.deadline){ const d=el('span','due'); d.textContent='期限 '+t.deadline;
+  if(t.deadline){ const d=el('span','due'); d.textContent=tr('due', {date: t.deadline});
                   meta.append(d, document.createTextNode('  ')); }
-  if(t.uncertain){ const u=el('span','flag'); u.textContent='待確認 請自行開信';
+  if(t.uncertain){ const u=el('span','flag'); u.textContent=tr('uncertain');
                    meta.append(u, document.createTextNode('  ')); }
-  if(!t.tickable){ const n=el('span','flag'); n.textContent='缺 id 無法操作';
+  if(!t.tickable){ const n=el('span','flag'); n.textContent=tr('noId');
                    meta.append(n, document.createTextNode('  ')); }
   if(t.pendingFollow){
     meta.append(Object.assign(el('span','pend'),
-        {textContent: t.following ? '已排定追蹤' : '已排定回到待辦'}),
+        {textContent: tr(t.following ? 'followQueued' : 'backQueued')}),
       document.createTextNode('  '));
   }else if(t.following){
     const a = el('span','age' + (t.followAlert ? ' stale' : ''));
-    a.textContent = (t.followDays ? `追蹤 ${t.followDays} 天` : '今天開始追蹤')
-      + (t.followAlert ? '，已到期'
-         : t.remindIn ? `，${t.remindIn} 天後提醒` + (t.pendingRemind ? ' 已排定' : '') : '');
+    a.textContent = (t.followDays ? tr('followDays', {n: t.followDays}) : tr('followToday'))
+      + (t.followAlert ? tr('followDue')
+         : t.remindIn ? tr('remindIn', {n: t.remindIn})
+                        + (t.pendingRemind ? ' ' + tr('queued') : '') : '');
     meta.append(a, document.createTextNode('  '));
   }
   appendSource(meta, t);
@@ -1054,74 +1128,77 @@ function cardBody(t){
   return body;
 }
 
-// 待分類 gets the four choices and no checkbox. 封存 is the same queued tick
-// as 已完成, so until the round reads it the row stays here and can be undone.
+// Triage gets the four choices and no checkbox. Archive is the same queued
+// tick as Done, so until the round reads it the row stays here and can be
+// undone.
 function triageRow(t){
   const r = el('div','row' + (t.checked?' done':''));
   const acts = el('div','acts');
   const st = el('div','st');
   if(t.tickable && t.checked){
-    acts.append(Object.assign(el('span','pend'),{textContent:'已排定封存'}),
-                button('取消', ()=>post('/api/check',{id:t.id,checked:false}), st));
+    acts.append(Object.assign(el('span','pend'),{textContent:tr('archiveQueued')}),
+                button(tr('cancel'), ()=>post('/api/check',{id:t.id,checked:false}), st));
   }else if(t.tickable){
     for(const [lv, name] of LEVELS)
       acts.append(button(name, ()=>post('/api/triage',{id:t.id,level:lv}), st,
                          'btn ' + lv));
-    acts.append(button('封存', ()=>post('/api/check',{id:t.id,checked:true}), st));
+    acts.append(button(tr('archive'), ()=>post('/api/check',{id:t.id,checked:true}), st));
   }
   r.append(cardBody(t), acts, st);
   return r;
 }
 
-// 追蹤中 mirrors 待分類: no checkbox, and 封存 is the same queued tick, so the
-// row stays here with 取消 until the round reads it. 回到待辦 keeps the level.
+// Follow-up mirrors triage: no checkbox, and Archive is the same queued tick,
+// so the row stays here with Cancel until the round reads it. Back to todo
+// keeps the level.
 function followRow(t){
   const r = el('div','row' + (t.checked?' done':''));
   const acts = el('div','acts');
   const st = el('div','st');
   if(t.tickable && t.checked){
-    acts.append(Object.assign(el('span','pend'),{textContent:'已排定封存'}),
-                button('取消', ()=>post('/api/check',{id:t.id,checked:false}), st));
+    acts.append(Object.assign(el('span','pend'),{textContent:tr('archiveQueued')}),
+                button(tr('cancel'), ()=>post('/api/check',{id:t.id,checked:false}), st));
   }else if(t.tickable){
-    acts.append(button('回到待辦', ()=>post('/api/follow',{id:t.id,follow:false}), st),
-                button('封存', ()=>post('/api/check',{id:t.id,checked:true}), st));
+    acts.append(button(tr('back'), ()=>post('/api/follow',{id:t.id,follow:false}), st),
+                button(tr('archive'), ()=>post('/api/check',{id:t.id,checked:true}), st));
   }
   r.append(cardBody(t), acts, st);
   return r;
 }
 
-// 待辦清單 offers only 已完成, 轉追蹤 and 重新分類, never the three levels, so a
-// filed row cannot be re-filed by a stray click. 重新分類 sends it back to 待分類.
-// A due follow offers 天後提醒 in place of 轉追蹤, because it still carries
-// followSince and a follow request would count as applied and change nothing.
+// The todo list offers only Done, Follow up and Re-triage, never the three
+// levels, so a filed row cannot be re-filed by a stray click. Re-triage sends
+// it back to triage. A due follow offers the remind button in place of Follow
+// up, because it still carries followSince and a follow request would count
+// as applied and change nothing.
 function row(t){
   const r = el('div','row' + (t.checked?' done':'') + (t.followAlert?' stale':''));
   const cb = el('input'); cb.type='checkbox'; cb.checked=t.checked;
-  cb.title = '已完成';
-  if(!t.tickable){ cb.disabled=true; cb.title='這筆缺少 message id，無法勾選'; }
+  cb.title = tr('done');
+  if(!t.tickable){ cb.disabled=true; cb.title=tr('noIdTick'); }
   const acts = el('div','acts');
   const st = el('div','st');
   if(t.tickable && t.followAlert){
     const n = el('input','days');
     Object.assign(n, {type:'number', min:1, max:MAX_REMIND, value:FOLLOW_DAYS,
-                      title:'幾天後再提醒'});
-    acts.append(n, button('天後提醒', ()=>{
+                      title:tr('remindTitle')});
+    acts.append(n, button(tr('remind'), ()=>{
       const days = Number(n.value);
       if(!Number.isInteger(days) || days < 1 || days > MAX_REMIND)
         return Promise.reject(new Error('bad days'));
       return post('/api/remind',{id:t.id,days});
     }, st));
   }else if(t.tickable){
-    acts.append(button('轉追蹤', ()=>post('/api/follow',{id:t.id,follow:true}), st));
+    acts.append(button(tr('follow'), ()=>post('/api/follow',{id:t.id,follow:true}), st));
   }
   if(t.tickable)
-    acts.append(button('重新分類', ()=>post('/api/triage',{id:t.id,level:''}), st));
+    acts.append(button(tr('retriage'), ()=>post('/api/triage',{id:t.id,level:''}), st));
   acts.classList.toggle('hidden', t.checked);
   r.append(cb, cardBody(t), acts, st);
 
   cb.onchange = async ()=>{
     const want = cb.checked;
-    st.className='st saving'; st.textContent='儲存中';
+    st.className='st saving'; st.textContent=tr('saving');
     cb.disabled = true;
     try{
       const res = await fetch('/api/check',{method:'POST',
@@ -1129,7 +1206,7 @@ function row(t){
         body:JSON.stringify({id:t.id,checked:want})});
       const j = await res.json();
       if(!j.ok) throw new Error(j.error||'failed');
-      st.className='st saved'; st.textContent='已儲存';
+      st.className='st saved'; st.textContent=tr('saved');
       r.classList.toggle('done', want);
       // A row queued as done has nothing left to re-file.
       acts.classList.toggle('hidden', want);
@@ -1137,7 +1214,7 @@ function row(t){
     }catch(e){
       // Never leave the box showing a state that is not on disk.
       cb.checked = !want;
-      st.className='st failed'; st.textContent='未儲存';
+      st.className='st failed'; st.textContent=tr('notSaved');
     }finally{ cb.disabled = false; }
   };
   return r;
