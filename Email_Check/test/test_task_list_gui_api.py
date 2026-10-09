@@ -281,7 +281,7 @@ r = cli.post("/api/follow", json={"id": "nope", "follow": True})
 check("following a todo that is gone is refused",
       r.status_code == 409 and r.get_json()["gone"] is True, r.get_json())
 
-# --- 延後提醒 on a red row ---
+# --- 天後提醒 on a due row ---
 clear(tg.FOLLOW_PATH)
 write(tg.STATE_PATH, {"roundSeq": 22, "todos": [
     {"id": "red", "subject": "red", "priority": "normal", "followSince": NOW - 5 * DAY},
@@ -536,6 +536,11 @@ check("the red threshold is the server's constant, not a second copy",
 check("and so is the postponement cap",
       "__MAX_REMIND__" not in page and f"const MAX_REMIND = {tg.MAX_REMIND_DAYS};" in page)
 check("the postpone control posts to the remind endpoint", "'/api/remind'" in page)
+check("a due follow is shown in 待辦清單 rather than 追蹤中",
+      "t.priority && (!t.following || t.followAlert)" in page
+      and "t.following && !t.followAlert" in page)
+check("天後提醒 is built once, on the 待辦清單 row of a due follow",
+      page.count("button('天後提醒'") == 1 and "if(t.tickable && t.followAlert)" in page)
 check("an alias mailbox is labelled rather than left looking unresolved",
       "直收" in page and "includes('@')" in page)
 check("every row kind renders the source line through one function",

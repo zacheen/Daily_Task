@@ -83,9 +83,11 @@ LINK_LOG_LINES = 200
 PRIORITIES = ("urgent", "important", "normal")
 # Mirrors ARCHIVE_TTL in statemachine.py, for showing days remaining.
 ARCHIVE_TTL_DAYS = 3
-# A 追蹤中 row this many days old turns red, since nobody has answered yet.
+# A 追蹤中 row this many days old comes due, since nobody has answered yet, and
+# the page shows it back in 待辦清單 marked red. Only the page moves it.
+# state.json keeps followSince, which is what lets 天後提醒 send it back.
 FOLLOW_ALERT_DAYS = 3
-# Upper bound on how far 延後提醒 can push a red row out.
+# Upper bound on how far 天後提醒 can push a due row out.
 MAX_REMIND_DAYS = 60
 HOST, PORT = "127.0.0.1", 8765
 # Long enough for a cold browser start on a busy machine. Exceeded with no page
@@ -476,7 +478,8 @@ def api_follow():
 
 @app.post("/api/remind")
 def api_remind():
-    """Postpone a 追蹤中 row's reminder by a number of days from now.
+    """Postpone a followed row's reminder by a number of days from now, which
+    sends a due row from 待辦清單 back to 追蹤中.
 
     Queued in the follow file as the due epoch, computed here at the click so
     the wait for the next round does not stretch the delay the user typed.
@@ -504,8 +507,8 @@ def api_remind():
 
 
 def _remind_at(todo: dict) -> int | None:
-    """When a stamped 追蹤中 row turns red, or None when its stamp is unusable,
-    which keeps a bad value from painting a row red."""
+    """When a stamped 追蹤中 row comes due, or None when its stamp is unusable,
+    which keeps a bad value from moving a row out of 追蹤中."""
     if _is_remind_at(todo.get("followRemindAt")):
         return todo["followRemindAt"]
     try:
@@ -665,8 +668,8 @@ def api_todos():
             and level in PRIORITIES
         # A queued follow has no stamp yet, so it shows no age until the round.
         days = _follow_days(t.get("followSince"), now) if following and stamped else 0
-        # A queued postponement counts at once, so the row stops being red on
-        # the click rather than on the next round.
+        # A queued postponement counts at once, so a due row returns to 追蹤中
+        # on the click rather than on the next round.
         due = want if _is_remind_at(want) else (_remind_at(t) if stamped else None)
         alert = bool(following and stamped and due is not None and now >= due)
         postponed = _is_remind_at(want) or _is_remind_at(t.get("followRemindAt"))
@@ -847,12 +850,12 @@ async function load(){
   catch(e){ document.getElementById('sub').textContent =
       '讀不到資料，伺服器已經關閉。重新啟動 task_list_gui.py'; return; }
   const fresh = d.todos.filter(t=>!t.priority);
-  const filed = d.todos.filter(t=>t.priority && !t.following);
-  // Longest wait first, so the red rows lead. The sort is stable, so ties
-  // keep the server's level-then-deadline order.
-  const tracked = d.todos.filter(t=>t.following)
-    .sort((a,b)=>(a.checked-b.checked) || (b.followAlert-a.followAlert)
-                 || (b.followDays-a.followDays));
+  // A due follow is the user's move again, so it sits in 待辦清單 marked red.
+  const filed = d.todos.filter(t=>t.priority && (!t.following || t.followAlert));
+  // Longest wait first. The sort is stable, so ties keep the server's
+  // level-then-deadline order.
+  const tracked = d.todos.filter(t=>t.following && !t.followAlert)
+    .sort((a,b)=>(a.checked-b.checked) || (b.followDays-a.followDays));
   const waiting = fresh.filter(t=>!t.checked).length;
   const open = filed.filter(t=>!t.checked).length;
   const watching = tracked.filter(t=>!t.checked).length;
@@ -861,7 +864,7 @@ async function load(){
     `${waiting} 項待分類，${open} 項待辦，${watching} 項追蹤中`
     + (done ? `，${done} 項已排定封存` : '');
   document.getElementById('foot').textContent =
-    `分類、勾選、追蹤或封存都在下次排程更新時才生效，在那之前都還可以反悔。追蹤滿 ${FOLLOW_DAYS} 天會變紅，變紅後可以延後提醒。已封存 ${d.archivedTotal} 項。`;
+    `分類、勾選、追蹤或封存都在下次排程更新時才生效，在那之前都還可以反悔。追蹤滿 ${FOLLOW_DAYS} 天會標紅移回待辦清單，在那裡可以設定幾天後再提醒。已封存 ${d.archivedTotal} 項。`;
 
   fill('listnew', 'cntnew', fresh, '沒有待分類的信', triageRow);
   fill('listold', 'cntold', filed, '目前沒有待辦', row);
@@ -1042,7 +1045,8 @@ function cardBody(t){
   }else if(t.following){
     const a = el('span','age' + (t.followAlert ? ' stale' : ''));
     a.textContent = (t.followDays ? `追蹤 ${t.followDays} 天` : '今天開始追蹤')
-      + (t.remindIn ? `，${t.remindIn} 天後提醒` + (t.pendingRemind ? ' 已排定' : '') : '');
+      + (t.followAlert ? '，已到期'
+         : t.remindIn ? `，${t.remindIn} 天後提醒` + (t.pendingRemind ? ' 已排定' : '') : '');
     meta.append(a, document.createTextNode('  '));
   }
   appendSource(meta, t);
@@ -1072,25 +1076,13 @@ function triageRow(t){
 // 追蹤中 mirrors 待分類: no checkbox, and 封存 is the same queued tick, so the
 // row stays here with 取消 until the round reads it. 回到待辦 keeps the level.
 function followRow(t){
-  const r = el('div','row' + (t.checked?' done':'') + (t.followAlert?' stale':''));
+  const r = el('div','row' + (t.checked?' done':''));
   const acts = el('div','acts');
   const st = el('div','st');
   if(t.tickable && t.checked){
     acts.append(Object.assign(el('span','pend'),{textContent:'已排定封存'}),
                 button('取消', ()=>post('/api/check',{id:t.id,checked:false}), st));
   }else if(t.tickable){
-    // Only a red row can be postponed, so the input is not noise on the rest.
-    if(t.followAlert){
-      const n = el('input','days');
-      Object.assign(n, {type:'number', min:1, max:MAX_REMIND, value:FOLLOW_DAYS,
-                        title:'幾天後再提醒'});
-      acts.append(n, button('天後提醒', ()=>{
-        const days = Number(n.value);
-        if(!Number.isInteger(days) || days < 1 || days > MAX_REMIND)
-          return Promise.reject(new Error('bad days'));
-        return post('/api/remind',{id:t.id,days});
-      }, st));
-    }
     acts.append(button('回到待辦', ()=>post('/api/follow',{id:t.id,follow:false}), st),
                 button('封存', ()=>post('/api/check',{id:t.id,checked:true}), st));
   }
@@ -1100,16 +1092,30 @@ function followRow(t){
 
 // 待辦清單 offers only 已完成, 轉追蹤 and 重新分類, never the three levels, so a
 // filed row cannot be re-filed by a stray click. 重新分類 sends it back to 待分類.
+// A due follow offers 天後提醒 in place of 轉追蹤, because it still carries
+// followSince and a follow request would count as applied and change nothing.
 function row(t){
-  const r = el('div','row' + (t.checked?' done':''));
+  const r = el('div','row' + (t.checked?' done':'') + (t.followAlert?' stale':''));
   const cb = el('input'); cb.type='checkbox'; cb.checked=t.checked;
   cb.title = '已完成';
   if(!t.tickable){ cb.disabled=true; cb.title='這筆缺少 message id，無法勾選'; }
   const acts = el('div','acts');
   const st = el('div','st');
+  if(t.tickable && t.followAlert){
+    const n = el('input','days');
+    Object.assign(n, {type:'number', min:1, max:MAX_REMIND, value:FOLLOW_DAYS,
+                      title:'幾天後再提醒'});
+    acts.append(n, button('天後提醒', ()=>{
+      const days = Number(n.value);
+      if(!Number.isInteger(days) || days < 1 || days > MAX_REMIND)
+        return Promise.reject(new Error('bad days'));
+      return post('/api/remind',{id:t.id,days});
+    }, st));
+  }else if(t.tickable){
+    acts.append(button('轉追蹤', ()=>post('/api/follow',{id:t.id,follow:true}), st));
+  }
   if(t.tickable)
-    acts.append(button('轉追蹤', ()=>post('/api/follow',{id:t.id,follow:true}), st),
-                button('重新分類', ()=>post('/api/triage',{id:t.id,level:''}), st));
+    acts.append(button('重新分類', ()=>post('/api/triage',{id:t.id,level:''}), st));
   acts.classList.toggle('hidden', t.checked);
   r.append(cb, cardBody(t), acts, st);
 
