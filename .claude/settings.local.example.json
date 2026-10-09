@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda run -n ML python \"<repo>\\Email_Check\\statemachine.py\"*)",
+      "Bash(conda run -n ML python \"<repo>\\Email_Check\\calendar_check.py\"*)",
+      "Bash(powershell.exe -NoProfile -File \"<repo>\\shared\\notify.ps1\"*)",
+      "Bash(powershell.exe -NoProfile -File \"<repo>\\shared\\open-task-list.ps1\"*)",
+      "PowerShell(conda run -n ML python \"<repo>\\Email_Check\\statemachine.py\"*)",
+      "PowerShell(conda run -n ML python \"<repo>\\Email_Check\\calendar_check.py\"*)",
+      "PowerShell(powershell.exe -NoProfile -File \"<repo>\\shared\\notify.ps1\"*)",
+      "PowerShell(powershell.exe -NoProfile -File \"<repo>\\shared\\open-task-list.ps1\"*)",
+      "mcp__gmail__search_emails",
+      "mcp__gmail__get_email_body",
+      "mcp__gmail__get_latest_email",
+      "Read(<repo>\\Email_Check\\**)",
+      "Edit(<repo>\\Email_Check\\**)"
+    ],
+    "deny": [
+      "Edit(<repo>\\Email_Check\\task_list\\tasks-checked.json)",
+      "Edit(<repo>\\Email_Check\\task_list\\tasks-restore.json)",
+      "Edit(<repo>\\Email_Check\\task_list\\tasks-triage.json)",
+      "Edit(<repo>\\Email_Check\\task_list\\tasks-follow.json)"
+    ]
+  },
+  "autoMemoryDirectory": "<repo>\\notes\\claude_memory"
+}

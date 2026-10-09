@@ -1,6 +1,6 @@
 <#
 UserPromptSubmit hook for the Gmail check routines. Registered only in the
-project's .claude/settings.local.json.
+project's .claude/settings.json.
 
 When statemachine.py gate answers SKIP, it blocks a scheduled Gmail run before
 the model starts, so a skipped run costs no tokens. Deciding inside the session

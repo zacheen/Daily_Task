@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch",
+      "PushNotification",
+      "Bash(grep:*)",
+      "Bash(sed -n:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Read(Email_Check/**)",
+      "Edit(Email_Check/**)"
+    ],
+    "deny": [
+      "Edit(Email_Check/task_list/tasks-checked.json)",
+      "Edit(Email_Check/task_list/tasks-restore.json)",
+      "Edit(Email_Check/task_list/tasks-triage.json)",
+      "Edit(Email_Check/task_list/tasks-follow.json)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PROJECT_DIR}/shared/gmail-gate-hook.ps1\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

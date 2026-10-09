@@ -35,7 +35,7 @@ It keeps transcripts younger than 14 days (`-DaysToKeep`) and never touches a fi
 ### gmail-gate-hook.ps1
 A `UserPromptSubmit` hook that blocks a scheduled Gmail round before the model starts when `Email_Check/statemachine.py gate` answers SKIP, so a skipped round costs no tokens. Every other outcome lets the prompt through, including an error or a timeout, because a wrong block silently loses a check while a wrong pass only costs tokens.
 
-It is registered only in the project's `.claude/settings.local.json` and not mirrored into `~/.claude/settings.json`, because both layers would check the same prompt twice. It fires on every prompt in this project, interactive ones included, and returns before starting Python unless the prompt opens with the `gmail-check-` scheduled-task marker. Keep the file ASCII, for the BOM reason under notify.ps1.
+It is registered only in the project's tracked `.claude/settings.json` and not mirrored into `~/.claude/settings.json`, because both layers would check the same prompt twice. It fires on every prompt in this project, interactive ones included, and returns before starting Python unless the prompt opens with the `gmail-check-` scheduled-task marker. Keep the file ASCII, for the BOM reason under notify.ps1.
 
 ### open-task-list.ps1
 Starts the task list page `Email_Check/task_list/task_list_gui.py` detached from the round that calls it. It launches `pythonw.exe` from the ML env through `Start-Process`, so no console window appears and the page outlives the round. Never switch it to `conda run`, which waits for the child process and would block the round until the user closes the page. The interpreter path is built from `$env:USERPROFILE` inside the script, so no instruction file carries the local username. Call it with the same `powershell.exe -NoProfile -File` form as notify.ps1.
@@ -51,7 +51,7 @@ Check each one before making a change
 
 1. **This repo**, by searching for the file name, for example `grep -rn "notify.ps1" .`
 2. **Other repos**, such as `SCHEDULED_RUN.md` in Event_Scout, the instruction files of each task under `Personal_Task/`, and the stub sources under every repo's `Scheduled_Tasks/`. A deployed `~/.claude/scheduled-tasks/<task-id>/SKILL.md` differs from its source only by the language paragraph at the end, so searching the sources is enough
-3. **Both permission settings files**, `.claude/settings.local.json` and `~/.claude/settings.json`. A permission rule is bound to the exact calling string, so changing how something is called without updating its rule leaves the scheduled run stuck on a permission prompt
+3. **Every permission settings file**, meaning the tracked `.claude/settings.json` for relative paths, the gitignored `.claude/settings.local.json` for absolute paths, and `~/.claude/settings.json`. A permission rule is bound to the exact calling string, so changing how something is called without updating its rule leaves the scheduled run stuck on a permission prompt
 
 After the change, recheck every caller, not only the one you are working on. Any change to a shared file's defaults, parameter names, parameter order, or a string bound by a permission rule affects every caller at once.
 
@@ -86,9 +86,9 @@ When it deploys, the tool appends a paragraph setting the reply language, which 
 
 The tool never creates a task. Create the task in the app first. The app owns `scheduled-tasks.json`, and the tool only overwrites a SKILL.md that already exists.
 
-**Grant permissions in advance.** A scheduled run is unattended, so a permission prompt wastes that run. Clicking Deny also ends the whole run outright, wiping out everything it did. Every tool the task uses must be written into the allowlist first, in both `.claude/settings.local.json` and `~/.claude/settings.json`.
+**Grant permissions in advance.** A scheduled run is unattended, so a permission prompt wastes that run. Clicking Deny also ends the whole run outright, wiping out everything it did. Every tool the task uses must be written into the allowlist first, in both the project layer and `~/.claude/settings.json`. The project layer is the tracked `.claude/settings.json` for relative paths plus the gitignored `.claude/settings.local.json` for absolute paths.
 
-**Permissions are stored in two places.** One is the settings file above, and the other is the task itself, which is where clicking Always allow in a prompt writes. Check both when cleaning up, or a rule cleared from one place reappears from the other. When unsure whether a capability should stay on, click Allow once, not Always allow.
+**Permissions are stored in two places.** One is the settings files above, and the other is the task itself, which is where clicking Always allow in a prompt writes. Check both when cleaning up, or a rule cleared from one place reappears from the other. When unsure whether a capability should stay on, click Allow once, not Always allow.
 
 **Hard-code the command strings.** A permission rule is bound to an exact command form. The task prompt has to say plainly that the command must be copied as is, because rewriting it into another calling form brings up a prompt. A rule is bound to the tool as well. A `Bash(...)` rule does not match the same command run by the PowerShell tool, so the prompt names the tool to use, and each Bash rule gets a `PowerShell(...)` mirror with the identical string as insurance.
 
@@ -125,6 +125,8 @@ Tasks that handle personal data live under here. One `.gitignore` rule excludes 
 ## Root files
 
 - `.gitignore`, covering each task's runtime state files and anything with personal data that must not reach the public remote
-- `.claude/settings.local.json`, the permission allowlist that unattended scheduled runs need, plus the `UserPromptSubmit` hook that runs gmail-gate-hook.ps1. It is gitignored, because it names the folders under `Personal_Task/` and carries machine-specific absolute paths, so a fresh clone rebuilds it. `Email_Check/INSTRUCTIONS.md` lists the rules and the hook the Gmail tasks need
+- `.claude/settings.json`, the tracked half of the permission allowlist that unattended scheduled runs need, holding the relative-path rules and the rules that carry no path, plus the `UserPromptSubmit` hook that runs gmail-gate-hook.ps1
+- `.claude/settings.local.json`, the gitignored half, holding the absolute-path rules, the Gmail tool rules, the rules of the tasks under `Personal_Task/` and `autoMemoryDirectory`. It stays off the remote because its paths are machine-specific and its `Personal_Task/` rules name folders the `.gitignore` keeps off
+- `.claude/settings.local.example.json`, the tracked template for it. A fresh clone copies it to `settings.local.json`, replaces every `<repo>` with the clone's absolute path written with doubled backslashes as JSON requires, and then adds the rules each task under `Personal_Task/` lists in its own README. `Email_Check/INSTRUCTIONS.md` says what each Gmail rule is for
 
 Add a new folder for a new task and add its runtime state files to `.gitignore`. A task that handles personal data goes under `Personal_Task/` instead, which is already excluded.
