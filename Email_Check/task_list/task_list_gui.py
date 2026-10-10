@@ -1136,8 +1136,10 @@ function cardBody(t){
         {textContent: name + (t.pendingLevel ? ' ' + tr('queued') : '')}));
   }
   if(t.deadline){
-    const d = el('span', 'due' + (t.deadlineDue ? ' over' : ''));
-    d.textContent = tr(!t.deadlineDue ? 'due' : t.dueIn < 0 ? 'overdue' : 'dueToday',
+    // Red from the deadline day on in triage too, where nothing else changes.
+    const over = t.dueIn !== null && t.dueIn <= 0;
+    const d = el('span', 'due' + (over ? ' over' : ''));
+    d.textContent = tr(!over ? 'due' : t.dueIn < 0 ? 'overdue' : 'dueToday',
                        {date: t.deadline});
     meta.append(d, document.createTextNode('  '));
   }

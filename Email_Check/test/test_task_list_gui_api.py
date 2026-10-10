@@ -594,6 +594,9 @@ check("and so is the postponement cap",
 check("the postpone control posts to the remind endpoint", "'/api/remind'" in page)
 check("the page splits rows by the section the server sends, not by its own rule",
       all(f"t.section === '{s}'" in page for s in ("triage", "todo", "follow")))
+check("the deadline turns red off dueIn, so a triage row past it is marked too",
+      "const over = t.dueIn !== null && t.dueIn <= 0;" in page
+      and "'due' + (over ? ' over' : '')" in page)
 check("a row past its deadline is offered no way back to follow-up",
       page.index("if(t.tickable && t.deadlineDue)")
       < page.index("else if(t.tickable && t.followAlert)"))

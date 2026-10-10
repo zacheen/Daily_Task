@@ -32,7 +32,7 @@ Changing those link rules means running `gmail_mcp/test_origin_links.py`. After 
 
 ## The task list page's languages
 
-Every word the page shows comes from a file in `Email_Check/task_list/locales/`. The page picks the file whose `language` equals `report_language` in `shared/skill_deploy.toml`, ignoring case, and falls back to `en.json` for a key the file lacks and for a language no file names. Adding a language means copying `en.json` and translating its `strings`, with no code change. Code, comments, `INSTRUCTIONS.md` and commit messages name the page's sections and buttons by their English labels. After changing a locale file or a label in the page, run `Email_Check/test/test_task_list_gui_api.py`, which checks that every key the page asks for exists in every locale with the same placeholders.
+The page's own text, meaning its labels, buttons and messages but not the mail fields it lists, comes from a file in `Email_Check/task_list/locales/`. The page picks the file whose `language` equals `report_language` in `shared/skill_deploy.toml`, ignoring case, and falls back to `en.json` for a key the file lacks and for a language no file names. Adding a language means copying `en.json` and translating its `strings`, with no code change. Code, comments, `INSTRUCTIONS.md` and commit messages name the page's sections and buttons by their English labels. After changing a locale file or a label in the page, run `Email_Check/test/test_task_list_gui_api.py`, which checks that every key the page asks for exists in every locale with the same placeholders.
 
 ## Do not compress INSTRUCTIONS.md to save tokens
 
