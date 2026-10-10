@@ -360,6 +360,17 @@ def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
     return (9999, 99, 99)
 
 
+def _due_in(text: str, today: dt.date) -> int | None:
+    """Days from today to the deadline, negative once it has passed, or None
+    when there is none or it is no real date."""
+    if not text:
+        return None
+    try:
+        return (dt.date(*_deadline_key(text, today)) - today).days
+    except (TypeError, ValueError):
+        return None
+
+
 def load_locale() -> tuple[str, dict]:
     """The html lang and strings of the locale whose `language` equals
     report_language, ignoring case, laid over the fallback's strings.
@@ -714,6 +725,7 @@ def api_todos():
         checked, levels, follows = prune_requests(todos)
     links, linking = links_for([tid for tid in map(_usable_id, todos) if tid])
     now = time.time()
+    today = dt.date.today()
     rows = []
     for t in todos:
         tid = _usable_id(t)
@@ -736,6 +748,19 @@ def api_todos():
         postponed = _is_remind_at(want) or _is_remind_at(t.get("followRemindAt"))
         remind_in = -int((now - due) // 86400) if following and postponed \
             and due is not None and due > now else 0
+        due_in = _due_in(str(t.get("deadline") or ""), today)
+        # From its deadline day on, a filed row shows as urgent and a follow-up
+        # comes back to the todo list. Only the page does this, so state.json
+        # keeps the level the user picked. Triage is left alone, because
+        # nothing leaves it on a clock.
+        deadline_due = level in PRIORITIES and due_in is not None and due_in <= 0
+        # Decided here rather than in the page, so the split is testable in Python.
+        if level not in PRIORITIES:
+            section = "triage"
+        elif following and not (alert or deadline_due):
+            section = "follow"
+        else:
+            section = "todo"
         rows.append({
             "id": tid or "",
             "tickable": tid is not None,
@@ -751,7 +776,12 @@ def api_todos():
             "deadline": t.get("deadline") or "",
             "uncertain": bool(t.get("uncertain")),
             "checked": tid is not None and tid in checked,
-            "priority": level if level in PRIORITIES else "",
+            # The shown level, which the sort below uses too, so a row past its
+            # deadline sorts with the urgent ones.
+            "priority": "urgent" if deadline_due else (level if level in PRIORITIES else ""),
+            "section": section,
+            "dueIn": due_in,
+            "deadlineDue": deadline_due,
             "pendingLevel": tid is not None and tid in levels,
             "following": following,
             "pendingFollow": isinstance(want, bool),
@@ -832,6 +862,7 @@ PAGE = """<!doctype html>
  .act{color:#c9cdd3;font-size:14px;overflow-wrap:anywhere}
  .meta{color:#8b9096;font-size:12px;margin-top:5px}
  .due{color:#ffb26b;font-weight:600}
+ .due.over{color:#ff7a7a}
  .box{color:#9fb8cc}
  .flag{color:#7fb2ff;font-weight:600}
  .st{font-size:11px;min-width:52px;text-align:right;padding-top:3px;flex:none}
@@ -922,12 +953,11 @@ async function load(){
   let d;
   try{ d = await (await fetch('/api/todos?cid='+CID)).json(); }
   catch(e){ document.getElementById('sub').textContent = tr('serverGone'); return; }
-  const fresh = d.todos.filter(t=>!t.priority);
-  // A due follow is the user's move again, so it sits in the todo list marked red.
-  const filed = d.todos.filter(t=>t.priority && (!t.following || t.followAlert));
+  const fresh = d.todos.filter(t=>t.section === 'triage');
+  const filed = d.todos.filter(t=>t.section === 'todo');
   // Longest wait first. The sort is stable, so ties keep the server's
   // level-then-deadline order.
-  const tracked = d.todos.filter(t=>t.following && !t.followAlert)
+  const tracked = d.todos.filter(t=>t.section === 'follow')
     .sort((a,b)=>(a.checked-b.checked) || (b.followDays-a.followDays));
   const waiting = fresh.filter(t=>!t.checked).length;
   const open = filed.filter(t=>!t.checked).length;
@@ -1105,8 +1135,12 @@ function cardBody(t){
     meta.append(Object.assign(el('span','lv '+t.priority),
         {textContent: name + (t.pendingLevel ? ' ' + tr('queued') : '')}));
   }
-  if(t.deadline){ const d=el('span','due'); d.textContent=tr('due', {date: t.deadline});
-                  meta.append(d, document.createTextNode('  ')); }
+  if(t.deadline){
+    const d = el('span', 'due' + (t.deadlineDue ? ' over' : ''));
+    d.textContent = tr(!t.deadlineDue ? 'due' : t.dueIn < 0 ? 'overdue' : 'dueToday',
+                       {date: t.deadline});
+    meta.append(d, document.createTextNode('  '));
+  }
   if(t.uncertain){ const u=el('span','flag'); u.textContent=tr('uncertain');
                    meta.append(u, document.createTextNode('  ')); }
   if(!t.tickable){ const n=el('span','flag'); n.textContent=tr('noId');
@@ -1170,15 +1204,19 @@ function followRow(t){
 // levels, so a filed row cannot be re-filed by a stray click. Re-triage sends
 // it back to triage. A due follow offers the remind button in place of Follow
 // up, because it still carries followSince and a follow request would count
-// as applied and change nothing.
+// as applied and change nothing. A row past its deadline offers neither,
+// since the deadline would hold it here whatever was queued.
 function row(t){
-  const r = el('div','row' + (t.checked?' done':'') + (t.followAlert?' stale':''));
+  const r = el('div','row' + (t.checked?' done':'')
+                     + (t.followAlert || t.deadlineDue ? ' stale' : ''));
   const cb = el('input'); cb.type='checkbox'; cb.checked=t.checked;
   cb.title = tr('done');
   if(!t.tickable){ cb.disabled=true; cb.title=tr('noIdTick'); }
   const acts = el('div','acts');
   const st = el('div','st');
-  if(t.tickable && t.followAlert){
+  if(t.tickable && t.deadlineDue){
+    // Done and Re-triage only.
+  }else if(t.tickable && t.followAlert){
     const n = el('input','days');
     Object.assign(n, {type:'number', min:1, max:MAX_REMIND, value:FOLLOW_DAYS,
                       title:tr('remindTitle')});

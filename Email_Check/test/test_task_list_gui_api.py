@@ -9,6 +9,7 @@ Flask's test client is used rather than a real server, so nothing binds a port
 and the watchdog never runs.
 """
 
+import datetime as dt
 import importlib.util
 import json
 import os
@@ -82,18 +83,24 @@ def by_id(rows):
 NOW = int(time.time())
 DAY = 86400
 
+
+def ahead(days):
+    """A deadline this many days from today. Relative, because a fixed date
+    starts counting as passed once the calendar reaches it."""
+    return (dt.date.today() + dt.timedelta(days=days)).isoformat()
+
 # --- /api/todos serves every todo with the level the page files it under ---
 write(tg.STATE_PATH, {
     "roundSeq": 12,
     "todos": [{"id": "old1", "subject": "older todo", "priority": "normal",
                "from": "reg@school.edu", "mailbox": "me@school.edu",
                "received": "2026-10-01 08:14",
-               "action": "do the thing", "deadline": "2026-10-02"},
-              {"id": "new2", "subject": "second new mail", "deadline": "2026-10-20"},
-              {"id": "new1", "subject": "new mail", "deadline": "2026-09-15",
+               "action": "do the thing", "deadline": ahead(3)},
+              {"id": "new2", "subject": "second new mail", "deadline": ahead(15)},
+              {"id": "new1", "subject": "new mail", "deadline": ahead(-3),
                "uncertain": True},
               {"id": "urg1", "subject": "urgent one", "priority": "urgent",
-               "deadline": "2026-12-01"},
+               "deadline": ahead(50)},
               {"id": "imp1", "subject": "important one", "priority": "important"}],
 })
 d = cli.get("/api/todos").get_json()
@@ -300,6 +307,9 @@ check("a future reminder keeps an old row out of red, and says when",
       == (False, 2, 5), rows["later"])
 check("a reminder that came due turns it red again",
       rows["due"]["followAlert"] is True and rows["due"]["remindIn"] == 0, rows["due"])
+check("a due follow is served in the todo list and a waiting one in follow-up",
+      [rows[i]["section"] for i in ("red", "due", "later", "plain")]
+      == ["todo", "todo", "follow", "todo"], {i: r["section"] for i, r in rows.items()})
 for bad in (0, 61, 2.5, True, "3"):
     r = cli.post("/api/remind", json={"id": "red", "days": bad})
     check(f"days={bad!r} is a bad request", r.status_code == 400, r.status_code)
@@ -313,8 +323,8 @@ check("the due moment is computed at the click",
 rows = by_id(cli.get("/api/todos").get_json()["todos"])
 check("a queued postponement clears the red at once and is marked pending",
       (rows["red"]["followAlert"], rows["red"]["remindIn"], rows["red"]["pendingRemind"],
-       rows["red"]["pendingFollow"], rows["red"]["following"])
-      == (False, 4, True, False, True), rows["red"])
+       rows["red"]["pendingFollow"], rows["red"]["following"], rows["red"]["section"])
+      == (False, 4, True, False, True, "follow"), rows["red"])
 write(tg.STATE_PATH, {"roundSeq": 23, "todos": [
     {"id": "red", "subject": "red", "priority": "normal", "followSince": NOW - 5 * DAY,
      "followRemindAt": due_at}]})
@@ -322,6 +332,50 @@ cli.get("/api/todos")
 check("a postponement drops once state.json carries it",
       read(tg.FOLLOW_PATH)["follow"] == {}, read(tg.FOLLOW_PATH))
 clear(tg.FOLLOW_PATH)
+
+# --- from its deadline day on, a filed row is urgent and a follow-up comes back ---
+deadline_todos = [
+    {"id": "past", "subject": "past", "priority": "normal", "deadline": ahead(-2)},
+    {"id": "today", "subject": "today", "priority": "important", "deadline": ahead(0)},
+    {"id": "soon", "subject": "soon", "priority": "normal", "deadline": ahead(1)},
+    {"id": "waitpast", "subject": "waiting, deadline came", "priority": "normal",
+     "followSince": NOW - DAY, "deadline": ahead(0)},
+    {"id": "waitsoon", "subject": "waiting, deadline ahead", "priority": "normal",
+     "followSince": NOW - DAY, "deadline": ahead(5)},
+    {"id": "fresh", "subject": "untriaged, deadline passed", "deadline": ahead(-4)},
+    {"id": "junk", "subject": "unreadable deadline", "priority": "normal",
+     "deadline": "next week"},
+    {"id": "nodate", "subject": "impossible date", "priority": "normal",
+     "deadline": "2026-02-30"}]
+write(tg.STATE_PATH, {"roundSeq": 24, "todos": deadline_todos})
+d = cli.get("/api/todos").get_json()
+rows = by_id(d["todos"])
+check("a filed row past its deadline shows as urgent and says by how much",
+      (rows["past"]["priority"], rows["past"]["deadlineDue"], rows["past"]["dueIn"])
+      == ("urgent", True, -2), rows["past"])
+check("so does one due today",
+      (rows["today"]["priority"], rows["today"]["deadlineDue"], rows["today"]["dueIn"])
+      == ("urgent", True, 0), rows["today"])
+check("a deadline still ahead leaves the level alone",
+      (rows["soon"]["priority"], rows["soon"]["deadlineDue"], rows["soon"]["dueIn"])
+      == ("normal", False, 1), rows["soon"])
+check("a follow-up whose deadline came is served urgent in the todo list",
+      (rows["waitpast"]["section"], rows["waitpast"]["priority"], rows["waitpast"]["following"])
+      == ("todo", "urgent", True), rows["waitpast"])
+check("one whose deadline is ahead stays in follow-up at its level",
+      (rows["waitsoon"]["section"], rows["waitsoon"]["priority"]) == ("follow", "normal"),
+      rows["waitsoon"])
+check("triage is left alone, since nothing leaves it on a clock",
+      (rows["fresh"]["section"], rows["fresh"]["priority"], rows["fresh"]["deadlineDue"],
+       rows["fresh"]["dueIn"]) == ("triage", "", False, -4), rows["fresh"])
+check("a deadline that is no real date has no effect",
+      all(rows[i]["dueIn"] is None and rows[i]["priority"] == "normal" for i in ("junk", "nodate")),
+      [rows["junk"], rows["nodate"]])
+check("rows past their deadline sort with the urgent ones, earliest first",
+      [t["id"] for t in d["todos"] if t["section"] == "todo"][:3] == ["past", "today", "waitpast"],
+      [t["id"] for t in d["todos"]])
+check("state.json keeps the level the user picked",
+      read(tg.STATE_PATH)["todos"] == deadline_todos)
 
 # The round applied f1 and w2, and w1 left the list.
 write(tg.STATE_PATH, {"roundSeq": 21, "todos": [
@@ -538,9 +592,11 @@ check("the red threshold is the server's constant, not a second copy",
 check("and so is the postponement cap",
       "__MAX_REMIND__" not in page and f"const MAX_REMIND = {tg.MAX_REMIND_DAYS};" in page)
 check("the postpone control posts to the remind endpoint", "'/api/remind'" in page)
-check("a due follow is shown in the todo list rather than follow-up",
-      "t.priority && (!t.following || t.followAlert)" in page
-      and "t.following && !t.followAlert" in page)
+check("the page splits rows by the section the server sends, not by its own rule",
+      all(f"t.section === '{s}'" in page for s in ("triage", "todo", "follow")))
+check("a row past its deadline is offered no way back to follow-up",
+      page.index("if(t.tickable && t.deadlineDue)")
+      < page.index("else if(t.tickable && t.followAlert)"))
 check("the remind button is built once, on the todo list row of a due follow",
       page.count("button(tr('remind')") == 1 and "if(t.tickable && t.followAlert)" in page)
 check("an alias mailbox is labelled rather than left looking unresolved",
