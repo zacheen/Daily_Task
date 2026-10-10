@@ -344,20 +344,29 @@ def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
     early merely looks odd. Only months more than BARE_LOOKBACK behind wrap to
     next year, which still keeps `01-05` sorting after `12-30`.
 
-    Anything unparseable sorts last rather than raising, because a malformed
-    deadline must not hide a row.
+    Anything that is no real date sorts last rather than raising, because a
+    malformed deadline must not hide a row. That includes numbers that parse
+    but name no day, such as 9-15-16-17 read as month 15 of year 9, which would
+    otherwise sort before every real date.
     """
+    last = (9999, 99, 99)
     today = today or dt.date.today()
     parts = [p for p in text.replace("/", "-").split("-") if p.strip().isdigit()]
     nums = [int(p) for p in parts]
     if len(nums) >= 3:
-        return (nums[0], nums[1], nums[2])
-    if len(nums) == 2:
+        key = (nums[0], nums[1], nums[2])
+    elif len(nums) == 2:
         month, day = nums[0], nums[1]
         behind = today.month - month
         year = today.year + 1 if behind > BARE_LOOKBACK else today.year
-        return (year, month, day)
-    return (9999, 99, 99)
+        key = (year, month, day)
+    else:
+        return last
+    try:
+        dt.date(*key)
+    except ValueError:
+        return last
+    return key
 
 
 def _due_in(text: str, today: dt.date) -> int | None:

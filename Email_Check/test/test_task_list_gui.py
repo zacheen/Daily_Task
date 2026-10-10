@@ -56,17 +56,19 @@ check("January still sorts after December", key("01-05") > key("12-30"))
 check("a full date keeps its own year", key("2026-01-05")[0] == 2026, key("2026-01-05"))
 check("explicit years order correctly", key("2027-01-05") > key("2026-12-30"))
 
-# Malformed input must sort last, never raise, never hide the row.
-for bad in ("", "尚未確認", "ASAP", "next week", "9", "--", "9-15-16-17"):
+# Malformed input must sort last, never raise, never hide the row. 9-15-16-17
+# parses to month 15 of year 9 and used to sort before every real date. Sep 15
+# stands for any notation the parser does not read.
+for bad in ("", "尚未確認", "ASAP", "next week", "9", "--", "9-15-16-17", "Sep 15"):
     try:
         k = key(bad)
-        ok = isinstance(k, tuple)
+        ok = isinstance(k, tuple) and k > key("2027-12-31")
     except Exception as exc:
         ok = False
         k = type(exc).__name__
     # ascii(), not !r. conda run relays stdout through a cp950 console that
     # raises on non-ASCII, and one of the inputs is CJK.
-    check("malformed deadline " + ascii(bad) + " is handled", ok, k)
+    check("malformed deadline " + ascii(bad) + " is handled and sorts last", ok, k)
 check("unparseable deadlines sort last", key("ASAP") > key("2027-12-31"), key("ASAP"))
 
 # The GUI's id policy must match the state machine's, or ticking one id-less

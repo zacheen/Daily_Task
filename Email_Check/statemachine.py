@@ -26,6 +26,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -99,6 +100,13 @@ NOTICE_DIR = os.path.join(HERE, "notices")
 FALLBACK_NOTICES = os.path.join(NOTICE_DIR, "en.json")
 # Gitignored, so a fresh clone that has not copied it in gets the fallback.
 LANGUAGE_CONFIG = os.path.join(os.path.dirname(HERE), "shared", "skill_deploy.toml")
+# Temporary diagnostic, removed with the parts Pending_fix.md entry 2 lists. Reported deadlines in any shape but a
+# full date, kept to learn whether other notations ever turn up before the
+# parser is taught them. Covered by the repo's *.log ignore rule. Trimmed to
+# the last DEADLINE_LOG_LINES lines.
+DEADLINE_LOG_PATH = os.path.join(HERE, "deadline-unparsed.log")
+DEADLINE_LOG_LINES = 200
+FULL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _load_notices() -> dict[str, Any]:
@@ -445,6 +453,10 @@ def _merge(prior: dict, latest: dict) -> dict:
 
 
 def _atomic_json(path: str, payload: Any) -> None:
+    _atomic_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _atomic_text(path: str, text: str) -> None:
     """The only write path for every file this module owns.
 
     A reader always sees the complete old or complete new file, which is
@@ -457,7 +469,7 @@ def _atomic_json(path: str, payload: Any) -> None:
                                suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -465,6 +477,36 @@ def _atomic_json(path: str, payload: Any) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def _deadline_branch(reported: str, stored: str) -> str:
+    """Which part of resolve_deadline handled a deadline not already written
+    YYYY-MM-DD. unparsed kept the text, guessed-year supplied a year to a bare
+    month and day, and reformatted only rewrote the separators or padding of
+    a date with a year."""
+    if not FULL_DATE.fullmatch(stored):
+        return "unparsed"
+    numbers = [p for p in reported.replace("/", "-").split("-") if p.strip().isdigit()]
+    return "guessed-year" if len(numbers) == 2 else "reformatted"
+
+
+def _log_odd_deadline(tid: str | None, branch: str, reported: str, stored: str) -> None:
+    """Append one line to DEADLINE_LOG_PATH. A failed write is dropped, since
+    a log must not fail the round it describes. ValueError covers a log file
+    that no longer decodes as UTF-8."""
+    line = (time.strftime("%Y-%m-%d %H:%M:%S") + "  " + branch + "  id=" + str(tid)
+            + "  reported=" + json.dumps(reported, ensure_ascii=False)
+            + "  stored=" + json.dumps(stored, ensure_ascii=False))
+    try:
+        try:
+            with open(DEADLINE_LOG_PATH, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except FileNotFoundError:
+            lines = []
+        _atomic_text(DEADLINE_LOG_PATH,
+                     "\n".join((lines + [line])[-DEADLINE_LOG_LINES:]) + "\n")
+    except (OSError, ValueError):
+        pass
 
 
 class StaleStateError(Exception):
@@ -736,6 +778,18 @@ class State:
         """
         reported = [{k: v for k, v in r.items() if k not in USER_OWNED}
                     for r in reported]
+        # Temporary, Pending_fix.md entry 2. Only when the stored value would
+        # change, because a round reconciles the same round.json todos again at
+        # every step and at commit.
+        stored = {_usable_id(t): t.get("deadline") for t in self.todos}
+        for item in reported:
+            raw = item.get("deadline")
+            if not isinstance(raw, str) or not raw.strip() or FULL_DATE.fullmatch(raw.strip()):
+                continue
+            resolved = resolve_deadline(raw)
+            key = _usable_id(item)
+            if key is None or stored.get(key) != resolved:
+                _log_odd_deadline(key, _deadline_branch(raw, resolved), raw, resolved)
         kept: dict[str, dict] = {}
         orphans: dict[str, dict] = {}
         for item in list(self.todos) + list(reported):
