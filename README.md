@@ -22,7 +22,7 @@ Three constraints
 A scheduled task that needs to notify the user always goes through this script, never Claude's built-in PushNotification tool. PushNotification pushes to the phone, which needs Remote Control, and the organization this account belongs to has not granted that permission, so calling it only returns Mobile push not sent and sends nothing. It also suppresses itself when it decides the user is present, and the user is often looking at another session and never sees the scheduled output.
 
 Two pitfalls
-- The script must stay UTF-8 with BOM. Windows PowerShell 5.1 decodes a BOM-less .ps1 with the system ANSI code page, which garbles the Chinese default values inside the script while arguments passed on the command line stay correct, so the symptom looks like a caller problem. Most editors and file-writing tools strip the BOM, so check again after every edit
+- The script must stay UTF-8 with BOM. It holds only ASCII now that its default title is English, but Windows PowerShell 5.1 decodes a BOM-less .ps1 with the system ANSI code page, so any non-ASCII literal added later would be garbled while arguments passed on the command line stay correct, and the symptom looks like a caller problem. Most editors and file-writing tools strip the BOM, so check again after every edit
 - Do not put double quotes in the message, because they break the quoting of the calling command
 
 ### cleanup-run-transcripts.ps1

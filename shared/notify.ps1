@@ -9,14 +9,18 @@ has no such suppression.
 Toasts are attributed to the PowerShell AppId because a toast requires an AppId
 already registered with Windows; an unregistered one is silently dropped.
 
-MUST stay UTF-8 WITH BOM. Windows PowerShell 5.1 decodes a BOM-less .ps1 as
-system ANSI (CP950 here), which mangles the $Title default into garbage while
-command-line -Message still renders fine, so the damage looks like a caller bug.
-Most editors and file-writing tools drop the BOM; re-add it after any rewrite.
+Keep it UTF-8 WITH BOM. Windows PowerShell 5.1 decodes a BOM-less .ps1 as
+system ANSI (CP950 here), so any non-ASCII literal added later turns to garbage
+while command-line -Message still renders fine, which looks like a caller bug.
+Most editors and file-writing tools drop the BOM. Re-add it after any rewrite.
+
+The $Title default is English because a fixed string cannot follow the report
+language, and neutral because the repo is public and must not reveal what a
+task does. Callers supply a title in that language unless it is a fixed name.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Message,
-    [string]$Title = "每日排程"
+    [string]$Title = "Daily tasks"
 )
 
 $ErrorActionPreference = "Stop"
