@@ -17,7 +17,7 @@ To change the **judgement criteria**, change this file. To change the **time win
 ## Goal
 Check the Gmail account `scout` for new mail since the last check, and judge whether any of it is important. Push a notification only when there really is important mail.
 
-Everything the user reads is written in the language the last paragraph of SKILL.md names. That covers the toast messages and every text field in `round.json` that the task list shows, such as `summary` and `action`. The examples in this file are in Traditional Chinese and show that form, and under another language the same content goes in that language instead. The task list page words its sections and buttons in that same language, from the file under `Email_Check/task_list/locales/` whose `language` matches, so this file names them by their English labels. When a message to the user names one, use its wording from that file.
+Everything the user reads is written in the language the last paragraph of SKILL.md names. That covers the toast messages and every text field in `round.json` that the task list shows, such as `summary` and `action`. The examples and labels in this file are in English, and the round writes the same content in that language, labels such as action needed and Unconfirmed included. The few fixed sentences come finished in that language from the script's output fields whose names end in `Notice`, so copy those as they are. The task list page words its sections and buttons in that same language, from the file under `Email_Check/task_list/locales/` whose `language` matches, so this file names them by their English labels. When a message to the user names one, use its wording from that file.
 
 The account parameter of the Gmail MCP tools must always be `"scout"`. This account alias is the only means of identification. **Do not look up the actual mailbox address it maps to, and do not write the address into any output**. Passing any other value fetches a different mailbox.
 
@@ -110,7 +110,7 @@ Those four read-only forms are fuses, not permissions, and must not be used to l
 
 Both settings files also still keep an old `Start-Process` rule that hard-codes the local `pythonw.exe` path. **It has no callers left and is kept for reference. Do not switch back to using it.** That path contains the local user name, so it exists only in the settings files that are not under version control, and this document does not repeat it.
 
-**Rules in the `Write(路徑)` form are never matched, only `Edit(路徑)` is**, and an `Edit` rule covers every file-editing tool (including creating a new file). Path entries must be placed in both relative and absolute forms, because the working directory during a scheduled run is not guaranteed.
+**Rules in the `Write(path)` form are never matched, only `Edit(path)` is**, and an `Edit` rule covers every file-editing tool (including creating a new file). Path entries must be placed in both relative and absolute forms, because the working directory during a scheduled run is not guaranteed.
 
 From now on, any new tool call or command **must be added to the allowlist at the same time**. If it is not, interactive tests look normal, and scheduled runs get stuck silently.
 
@@ -168,7 +168,7 @@ conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\statemachin
 
 If it returns `STILL_RUNNING`, run the same line again. `COVERED` means that round has committed and scanned this period, so end this round quietly. `TAKE_OVER` means that round has written no progress for over 20 minutes and is treated as dead, so go back to step 1 and rerun `begin`, and this round takes over. `wait` only reads and never writes, so several rounds waiting at once do not interfere with each other. If two rounds rerun `begin` at the same time while taking over, one of them receives `ROUND_ALREADY_RUNNING` again and waits again in the same way.
 
-The decision is based on when `round-progress.json` was last written. `begin` and every `step` write it, and `commit` deletes it. Receiving this status used to mean ending at once, and as a result, if the first round died partway, the whole batch of catch-up runs was wasted, because the other rounds had already left. A round that accidentally reruns its own `begin` also receives this status. It likewise runs `wait` instead and takes over once its own progress file expires, so the round is not thrown away. The cost is that the other rounds cannot end until the first round finishes, and when the first round dies it takes up to 20 minutes before anyone takes over. Scheduled slots are several hours apart, so the only rounds that reach this path are the ones catching up at the same time, and a 「立即執行」 (Run now) pressed by hand while another round is still running.
+The decision is based on when `round-progress.json` was last written. `begin` and every `step` write it, and `commit` deletes it. Receiving this status used to mean ending at once, and as a result, if the first round died partway, the whole batch of catch-up runs was wasted, because the other rounds had already left. A round that accidentally reruns its own `begin` also receives this status. It likewise runs `wait` instead and takes over once its own progress file expires, so the round is not thrown away. The cost is that the other rounds cannot end until the first round finishes, and when the first round dies it takes up to 20 minutes before anyone takes over. Scheduled slots are several hours apart, so the only rounds that reach this path are the ones catching up at the same time, and a Run now pressed by hand while another round is still running.
 
 
 ### 1. begin
@@ -193,7 +193,7 @@ Fields that come with `PROCEED`
 | `judgeNow` | Older backlog not yet fully judged. All of it must be judged this round |
 | `nextQuery` | The first query to run, containing `query`, `lo`, `hi`, `max_results` |
 | `coverageStalled` | **Appears only on a fault**, and when it appears it is `true`. See the section below for how to handle it |
-| `stalledHours` | Present exactly when the previous field is. It is how many hours behind coverage is, and the alert message must include this number |
+| `stalledHours` / `stalledNotice` | Present exactly when the previous field is. `stalledHours` is how many hours behind coverage is, and `stalledNotice` is the finished alert message with that number already in it |
 
 `config` is the health of `config.json`, with fields `status` / `names` / `calendarUrls` / `alert`. You do not need to check yourself whether the file exists, because the script has already looked.
 
@@ -201,7 +201,7 @@ When `status` is `present`, read `Email_Check/config.json` to get `names`, which
 
 When `alert` is `true`, the notification in step 5 must carry an extra section about the config file anomaly. It is `true` only in the round where the state turns from normal to abnormal, or from one kind of anomaly to another, so a missing file left unfixed does not send a notification every round.
 
-**If the notification succeeds, report `configAlerted` in step 6.** Alerts follow the same 「預設保留」 (keep by default) rule as mail, so if it is not reported it is treated as not yet delivered and the next round sends it again. Leaving it out only costs one extra notification, and leaving it out after a successful send causes no error either. Conversely, filling it in when the send failed silences this fault permanently, until it turns into a different kind of fault.
+**If the notification succeeds, report `configAlerted` in step 6.** Alerts follow the same keep-by-default rule as mail, so if it is not reported it is treated as not yet delivered and the next round sends it again. Leaving it out only costs one extra notification, and leaving it out after a successful send causes no error either. Conversely, filling it in when the send failed silences this fault permanently, until it turns into a different kind of fault.
 
 When `calendarUrls` is 0, **do not call `calendar_check.py`**. An empty array is a valid setting in which the user deliberately turned off the calendar check, not a fault. Calling it would only return `UNCHECKED` and waste a subprocess. Handle events directly as not on the calendar, per step 4.
 
@@ -211,11 +211,7 @@ When `calendarUrls` is 0, **do not call `calendar_check.py`**. An empty array is
 
 **These two fields normally do not exist.** A normal round's return does not contain them at all, so there is no need to judge the size of the number or compare it against any threshold. Seeing them means a fault, and not seeing them means normal. The threshold comparison has already been done in the script.
 
-Send it with the exact command format from step 5. Copy the message from the line below verbatim, replacing only the number with the value of `stalledHours`.
-
-```
-Gmail 檢查已經 <stalledHours> 小時沒有跑完任何一輪，信可能正在累積，需人工檢查
-```
+Send it with the exact command format from step 5, with `stalledNotice` copied verbatim as the message.
 
 **After sending it, continue this round normally, and do not abort.** A lagging front does not mean this round will fail too, and finishing this round is exactly how the front catches up.
 
@@ -232,10 +228,10 @@ The 24-hour threshold is longer than the longest normal gap between two slots, w
 Re-send mail in **`notifyNow`** directly per step 5. Its importance was already confirmed last round, so do not judge it again.
 
 Mail in **`judgeOverdue`** has already waited more than two rounds. **Never drop it because you cannot decide.**
-- For mail that looks like part of a job application process (recruiter, HR, ATS, company domain), comes from a high-risk source (school, government, bank, insurance, landlord), or looks like a personal exchange with a real person, **send a 「待確認」 (needs checking) notification** and let the user open the mail themselves
+- For mail that looks like part of a job application process (recruiter, HR, ATS, company domain), comes from a high-risk source (school, government, bank, insurance, landlord), or looks like a personal exchange with a real person, **send an "Unconfirmed" notification** and let the user open the mail themselves
 - Drop it only when you are sure it is marketing or a platform push notification
 
-The reason is that queueing has a cost of its own. When there were only four slots a day, waiting two rounds meant more than ten hours, and an OA due that same afternoon was meaningless by the time its turn came. Since 2026-09-28 about one round actually runs per hour, so waiting two rounds takes about two hours and mail can be escalated to 「待確認」 during the day. There are no rounds at night between 22:20 and 06:50, so the longest wait still lasts until the next morning.
+The reason is that queueing has a cost of its own. When there were only four slots a day, waiting two rounds meant more than ten hours, and an OA due that same afternoon was meaningless by the time its turn came. Since 2026-09-28 about one round actually runs per hour, so waiting two rounds takes about two hours and mail can be escalated to "Unconfirmed" during the day. There are no rounds at night between 22:20 and 06:50, so the longest wait still lasts until the next morning.
 
 Judge everything in **`judgeNow`** this round. There is no limit on how many times you read a body, so if you cannot decide, read it.
 
@@ -258,16 +254,16 @@ This is stronger than `excludedSenders`, because a label can be applied to just 
 Once you have the results, first judge this batch per step 4, **write this batch's `important`, `todos` and `defer` into `round.json`** (format in step 6, and remember to include the `roundToken` that `begin` gave you), then report with the Bash tool.
 
 ```
-... statemachine.py step --lo <lo> --hi <hi> --count <這批回傳的封數>
+... statemachine.py step --lo <lo> --hi <hi> --count <number of messages this batch returned>
 ```
 
 If the search errors or times out, retry once. If it still fails, report `... statemachine.py step --failed` instead.
 
-**A search that completes with no output means zero messages, not a failure.** The tool returns an empty list when nothing matches, and the client shows that as no output at all. A failed search always comes back as an error, because the MCP raises rather than returning an empty list. So report no output as `--count 0` with the `--lo` and `--hi` of that query. Reporting it as `--failed` is not the safe side here. It keeps a range that was already scanned and sends a false 「尚有舊信未掃完」 toast, which happened in one round when a 74-minute window really held no mail.
+**A search that completes with no output means zero messages, not a failure.** The tool returns an empty list when nothing matches, and the client shows that as no output at all. A failed search always comes back as an error, because the MCP raises rather than returning an empty list. So report no output as `--count 0` with the `--lo` and `--hi` of that query. Reporting it as `--failed` is not the safe side here. It keeps a range that was already scanned and sends a false backlog toast, which happened in one round when a 74-minute window really held no mail.
 
 Always look up the `status` from `step` in the master table at the start, and **it is likewise not repeated here**, for the same reason as in step 1. It may return any status whose subcommand column in the table includes step.
 
-When `stuck` is not empty, it means more than 40 messages are packed into the same second and cannot be bisected any further. The notification must say 「舊信追趕卡住 需人工處理」, because that will not resolve itself.
+When `stuck` is not empty, it means more than 40 messages are packed into the same second and cannot be bisected any further. The same output then carries `stuckNotice`, and the notification must include it verbatim, because that will not resolve itself.
 
 ### 4. Decide what is important
 There is only one main criterion, the actionability test below. Separately there is one independent exception category.
@@ -312,17 +308,17 @@ One domain may send both. A real case is `taiwannext.org`. The Mailchimp list on
 **When the salutation in a mail is someone else's name, the matter is not for the user to do. This is decisive, not advisory.**
 
 How to apply it.
-- Compare the name in the opening salutation (`Hi X`, `Dear X`, `X 您好`) against `names` in `config.json`. Match loosely, so first name only, surname only, different romanized spellings, and Chinese characters swapped with pinyin all count as a hit
+- Compare the name in the opening salutation (`Hi X`, `Dear X`, or the same greeting in any language) against `names` in `config.json`. Match loosely, so first name only, surname only, different romanized spellings, and Chinese characters swapped with pinyin all count as a hit
 - A hit, or no discernible salutation -> judge as usual
 - The salutation is **a clearly different person** -> **not important, not into `todos`, no push**, put the id in `judgedIds` to close it
 
-**A group salutation is not someone else's name and is not exclusion evidence.** `Dear Taiwan Next Volunteers`, `各位同學`, `Dear Students` refer to a group the user is part of, so the user is a recipient. This rule fires only when the salutation is **a specific person who is not the user**. On a group salutation, go back to the main criterion and apply the paragraph above saying that mass sending by itself does not prove it has nothing to do with the user.
+**A group salutation is not someone else's name and is not exclusion evidence.** `Dear Taiwan Next Volunteers` and `Dear Students`, like any greeting meaning the same in another language, refer to a group the user is part of, so the user is a recipient. This rule fires only when the salutation is **a specific person who is not the user**. On a group salutation, go back to the main criterion and apply the paragraph above saying that mass sending by itself does not prove it has nothing to do with the user.
 
-Another real case. The user once received a mail from Tesla whose content was 「你已報名的 Supercharging Your Resume Workshop 今天 16:30 舉行」. That **is** a todo, because attending is an action and the time is a hard deadline. Do not exclude it because it reads like a reminder or like event promotion. The basis for the ruling is that it gives a concrete time at which the user must show up, and the user already agreed.
+Another real case. The user once received a mail from Tesla whose content was "the Supercharging Your Resume Workshop you registered for is today at 4.30 pm". That **is** a todo, because attending is an action and the time is a hard deadline. Do not exclude it because it reads like a reminder or like event promotion. The basis for the ruling is that it gives a concrete time at which the user must show up, and the user already agreed.
 
-A real case. The user once received a mail from the volunteer group with the subject 「煩請補交 Facebook 個人帳號連結」, opening with `Hi Hsiao Ming`. That is not any form of the user's name, so it was a mail for someone else. The ruling at the time upgraded it to a 「待確認」 (to be confirmed) todo, and **that was wrong**.
+A real case. The user once received a mail from the volunteer group with the subject "please send in your Facebook profile link", opening with `Hi <someone else's name>`. That is not any form of the user's name, so it was a mail for someone else. The ruling at the time upgraded it to an "Unconfirmed" todo, and **that was wrong**.
 
-**Do not handle this case with `uncertain` or 「待確認」.**
+**Do not handle this case with `uncertain` or "Unconfirmed".**
 `uncertain` is for mail that is certainly for the user to handle but whose details cannot be fully seen. "Unsure whether this mail is for the user" is not its use. If the salutation is someone else, it is someone else, so close it directly. Do not hand the user an item he should never tick and would not know why it is there.
 
 The reverse does not hold. **The user's name not appearing in a mail does not mean the mail is not for the user.** With no name written, the default is still that it is for the user to do. Only a written name of **someone else** is exclusion evidence.
@@ -341,9 +337,9 @@ Examples that count as a next action.
 - **A verification link for a mailbox or account.** The kind you click to complete registration or activation, for example a job application system asking to verify the candidate account. The link sits in the mail waiting to be clicked, and until it is clicked the thing stays incomplete, so it is something not yet done. **When the mail gives a one-time verification code it does not count**, the boundary is in that entry below
 - **Bills to pay.** Credit card bills, utilities, tuition, premiums, tax bills, loans. **It counts even when the mail states no amount or deadline**. The next action for that kind of mail is to log in, look it up and pay
 - **Account statements and monthly statements.** The user will check whether the account is in order, so the next action is "go check it once". Do not exclude a statement because it reads like a record. A bill's action is paying and a statement's action is checking, and both are things not yet done. What truly does not count is a **single-transaction receipt**, which is finished once read
-- **Events already registered for or agreed to, as long as they have a concrete date and time.** For example a registered workshop, info session, mock interview, or a mandatory department event. **But this category must check the calendar first**, see the Check the calendar for events first section below. Write the time into `action`, for example 「今天 16:30 出席 Tesla 履歷工作坊」, because `deadline` holds only a date, and for a same-day event the date alone does not show how many hours are left.
+- **Events already registered for or agreed to, as long as they have a concrete date and time.** For example a registered workshop, info session, mock interview, or a mandatory department event. **But this category must check the calendar first**, see the Check the calendar for events first section below. Write the time into `action`, for example "attend the Tesla resume workshop today at 4.30 pm", because `deadline` holds only a date, and for a same-day event the date alone does not show how many hours are left.
 
-  **When the subject or body contains 「行前通知」「行前提醒」「注意事項」「See you at」, that word itself declares that the user already agreed to go.** Sending such a mail presupposes the recipient is on the list. Do not read it as event promotion. Promotion recruits people to come, while a pre-event notice gives details to people who already agreed.
+  **When the subject or body contains a phrase such as pre-event notice, pre-event reminder, what to know before the event or See you at, in any language and any wording that means the same, that phrase itself declares that the user already agreed to go.** Sending such a mail presupposes the recipient is on the list. Do not read it as event promotion. Promotion recruits people to come, while a pre-event notice gives details to people who already agreed.
 
   **Such mail often tucks another action under the time and place, for example filling in a registration form, registering a ticket, paying a fee, or replying with attendance.** The snippet is just long enough to hold the date, time and place, and the action is cut off after it out of view, so a snippet showing "event time and place" does not mean "this mail has only the time and place". After ruling it a registered event, read the body to pull out the tucked-in action, see the When to read the body section below
 - **A recruiting event invitation run by the employer itself counts even if not yet registered for.** The company's own info session, recruiting kick-off, campus recruiting session or internship info session counts as long as it gives a concrete session time. This is an exception to "Events already registered for or agreed to". That entry requires the user to have agreed first, this one does not, and an opening of `Hi there` naming no one makes no difference. The action is "decide whether to register, and register". `deadline` is the event day, and when there are several sessions use the nearest one still open for registration.
@@ -366,7 +362,7 @@ Examples that do not count as a next action.
 - Purely commercial newsletters, product promotion, third-party career fair solicitations. **A recruiting event invitation run by the employer itself is not in this category**, it is a todo
 - **File-sharing and permission notices sent by a platform.** Mail such as "someone shared a file with you" or "you can now view or edit this file" only **tells you that you gained a permission**, with nothing to do. Canva, Google Drive, Notion and Figma all send them. **Not important, not a todo, and do not notify either.**
 
-  **Judge the sender by the actual address, not the display name.** Platforms put the sharer's name in the display name, so it looks as if a real person sent it. A measured case had the shape `<某個人名> (Canva) <no-reply@canva.com>`. The display name has a person's name and the address is `no-reply@`, so it was sent by the platform and is not correspondence with a real person. Anything from `no-reply@` / `noreply@` / `donotreply@` or a platform domain is always treated as automated mail.
+  **Judge the sender by the actual address, not the display name.** Platforms put the sharer's name in the display name, so it looks as if a real person sent it. A measured case had the shape `<a person's name> (Canva) <no-reply@canva.com>`. The display name has a person's name and the address is `no-reply@`, so it was sent by the platform and is not correspondence with a real person. Anything from `no-reply@` / `noreply@` / `donotreply@` or a platform domain is always treated as automated mail.
 
   **A sharing notice a real person sends from their own mailbox is a different matter.** That is a real address you can reply to, and it falls under the independent exception for "personal correspondence from a real person", so it counts as important and is notified (but it has no action to complete, so it does not become a todo). The exclusion is when the mail additionally asks you to finish something by a deadline, and then judge by that thing, not by the sharing itself
 - Purely informational notices, single-transaction receipts, records of completed transactions. **This means records of "the thing is already done". A bill to pay is not in this category**, see "Bills to pay" above
@@ -395,7 +391,7 @@ The user's calendar is his scheduling system. An event already on the calendar n
 When a mail is ruled "an event already registered for or agreed to", first run this with the Bash tool.
 
 ```
-conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_check.py" --summary "<信件主旨>" --date <YYYY-MM-DD>
+conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_check.py" --summary "<mail subject>" --date <YYYY-MM-DD>
 ```
 
 `--date` is the event day, not the day the mail arrived. The returned `status` has only three values.
@@ -403,8 +399,8 @@ conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_ch
 | status | Meaning | What you do |
 |---|---|---|
 | `FOUND` | A matching event is on the calendar | **No todo for attending.** If the mail has no other action, put the id in `judgedIds` to close it |
-| `NOT_FOUND` | All calendars were checked and none has it | Create a todo, with `action` saying 「把 X 加進日曆」 plus the time |
-| `UNCHECKED` | Could not check reliably, `reason` says which kind, see below | Create a todo and append 「日曆未確認」 to the end of `action` |
+| `NOT_FOUND` | All calendars were checked and none has it | Create a todo, with `action` saying "add X to the calendar" plus the time |
+| `UNCHECKED` | Could not check reliably, `reason` says which kind, see below | Create a todo and append "calendar not checked" to the end of `action` |
 
 `UNCHECKED` has four causes, all handled the same way, and `reason` is only for humans to read.
 
@@ -414,10 +410,10 @@ conda run -n ML python "D:\dont_move\git_save\Daily_Task\Email_Check\calendar_ch
 - **Found only in a stale cache.** Every matched event comes from old data served after a fetch failure. **Not every feed has to be down.** As long as none of the live ones match, this is the result. Old data only proves the event once existed, not that it still does, so it does not count as `FOUND`. Conversely, as soon as any single live feed matches it is `FOUND`, because existence needs only one source
 
 **The calendar check covers only the attend item and cannot cancel other actions the mail explicitly requires.**
-Filling in a registration form, registering a ticket, paying a fee, replying with the attendee count, none of these is done just because the event is on the calendar. `FOUND` only lets you skip the 「把 X 加進日曆」 entry, and the "register" item of the employer recruiting event category (reason above, the event being on the calendar means the user registered). Every other action must still be created, with `action` stating that action itself rather than attendance. Getting this rule backwards really did drop items once, because the user's calendar holds both the event itself and side events around it, so `FOUND` is easily true.
+Filling in a registration form, registering a ticket, paying a fee, replying with the attendee count, none of these is done just because the event is on the calendar. `FOUND` only lets you skip the "add X to the calendar" entry, and the "register" item of the employer recruiting event category (reason above, the event being on the calendar means the user registered). Every other action must still be created, with `action` stating that action itself rather than attendance. Getting this rule backwards really did drop items once, because the user's calendar holds both the event itself and side events around it, so `FOUND` is easily true.
 
 **But multiple actions from the same mail go into one todo, not one todo each.**
-The script upserts keyed by message id. If one round reports two `todos` with the same id, the later one's `action` simply overwrites the earlier one, so you think you created two things but only one is kept. To keep them all, write them all into one `action` string, for example 「9-12 志工訓練 填訓練報名表並繳 200 元保證金」.
+The script upserts keyed by message id. If one round reports two `todos` with the same id, the later one's `action` simply overwrites the earlier one, so you think you created two things but only one is kept. To keep them all, write them all into one `action` string, for example "9-12 volunteer training, fill in the training registration form and pay the 200 dollar deposit".
 
 **`UNCHECKED` must never be treated as `FOUND`.** Failing to check does not mean it is there, and that direction makes the user think the event is already on the calendar and miss it. The script obeys this too. When some calendar fetches fail it returns `UNCHECKED` rather than `NOT_FOUND`, because absence cannot be proven.
 
@@ -457,9 +453,9 @@ Do not read the body for pure commercial marketing or platform job alerts, since
 **Mail you still cannot decide after reading the body must not be treated as unimportant.**
 Put it into `defer` in step 6, and the next round handles it first. Insufficient information means not yet judged, not judged unimportant. When `get_email_body` cannot fetch the body, it also goes into `defer`, and do not treat it as nothing. But `defer` is now the exception rather than the norm. No quota will run out, so the only legitimate reason to leave a mail for the next round is that reading it still did not settle it.
 
-There are two reasons to store from / subject / snippet rather than only the id. First, the next round does not have to search again just to see the list. Second, once the watermark advances that mail no longer appears in any query, so with only the id the context can never be recovered, and not even a 「待確認」 notification could be written.
+There are two reasons to store from / subject / snippet rather than only the id. First, the next round does not have to search again just to see the list. Second, once the watermark advances that mail no longer appears in any query, so with only the id the context can never be recovered, and not even an "Unconfirmed" notification could be written.
 
-If the mail already has clear clues pointing to a mandatory task and only the details cannot be fully seen, you may notify directly and mark 「待確認」 in the summary rather than holding it back.
+If the mail already has clear clues pointing to a mandatory task and only the details cannot be fully seen, you may notify directly and mark "Unconfirmed" in the summary rather than holding it back.
 
 ### 5. Notify
 
@@ -468,10 +464,10 @@ Notification has exactly one channel, the local Windows toast. **The command str
 **Run it with the Bash tool.** The line below is in the `powershell.exe -NoProfile -File` form and contains no `&`, so Bash does not take anything in it as the background-execution operator.
 
 ```
-powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "<那一行訊息>" -Title "Gmail"
+powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "<the one-line message>" -Title "Gmail"
 ```
 
-**The old `& "路徑" ...` form was retired on 2026-09-10. Do not switch back to it.** With the PowerShell tool, that form got stuck at a permission prompt once on 2026-09-09 and once on 2026-09-10, even though both layers of settings files held a verbatim-matching rule. The Rules go in both layers section above records the full chain of reasoning.
+**The old `& "path" ...` form was retired on 2026-09-10. Do not switch back to it.** With the PowerShell tool, that form got stuck at a permission prompt once on 2026-09-09 and once on 2026-09-10, even though both layers of settings files held a verbatim-matching rule. The Rules go in both layers section above records the full chain of reasoning.
 
 A reply of `Toast sent.` means it was delivered, so write that batch's ids into `notifiedIds` in step 6. On failure, do not retry, do not try another way of writing it and do not switch to another tool. That batch stays in the queue for the next round.
 
@@ -483,26 +479,26 @@ The message is one line, at most 200 characters, no markdown, fields separated b
 
 **Wherever else this document speaks of a push, meaning a notification we send ourselves, it is always the toast above.** The job-alert pushes mentioned for platforms such as LinkedIn and Handshake are a different thing. Those are mail sent by others, so do not mix the two up.
 
-The push message itself uses the second person 「你」, because it is shown directly to the user. Everywhere else, this instruction file always says "the user". Do not unify the two.
+The push message itself uses the second person, addressing the user as you, because it is shown directly to the user. Everywhere else, this instruction file always says "the user". Do not unify the two.
 
-Mail with a next action goes first and is marked 「需動作」 (action needed). A deadline, when there is one, must be included. But having no deadline does not mean no notification is needed.
+Mail with a next action goes first and is marked "action needed". A deadline, when there is one, must be included. But having no deadline does not mean no notification is needed.
 
 Examples
-- Action needed    Gmail 需動作 1 封 / Northeastern OGS / 9-15 前補交註冊文件
-- No deadline    Gmail 需動作 1 封 / Waymo recruiter 問你有無興趣 / 等你回覆
-- Mixed      Gmail 重要信 2 封 / 需動作 房東要求 9-10 前確認續約 / Anthropic 面試邀約
-- Uncertain    Gmail 需動作 1 封 / Northeastern OGS 疑似補件要求 / 待確認 請自行開信
-- Catching up    Gmail 重要信 1 封 / Anthropic 面試邀約 / 尚有舊信未掃完
+- Action needed    Gmail 1 action needed / Northeastern OGS / send the registration documents by 9-15
+- No deadline    Gmail 1 action needed / Waymo recruiter asks whether you are interested / waiting for your reply
+- Mixed      Gmail 2 important / action needed, the landlord wants the lease renewal confirmed by 9-10 / Anthropic interview invitation
+- Uncertain    Gmail 1 action needed / Northeastern OGS, looks like a request for missing documents / Unconfirmed, open the mail yourself
+- Catching up    Gmail 1 important / Anthropic interview invitation / Older mail is still being scanned
 
 With no important mail, **do not push** and end quietly. Step 6 must still run, though.
 
-When `commit` returns `shouldAnnounceBacklog` as true, send a 「尚有舊信未掃完」 push even if there is no important mail. The script already does the throttling (at most once every 3 rounds), so just do what it says and do not decide on throttling yourself.
+When `commit` returns `shouldAnnounceBacklog` as true, it also returns `backlogNotice`. Send a push carrying it verbatim even if there is no important mail. It is the last part of the Catching up example above. The script already does the throttling (at most once every 3 rounds), so just do what it says and do not decide on throttling yourself.
 
 The same applies when `begin`'s `config.alert` is true. Push even if there is no important mail. If there is important mail, append the alert to the end of that same message and do not send a second one. The script already does this throttling too, so do not judge it yourself.
 
 Examples
-- Config only    Gmail 設定檔異常 / config.json 不存在 / 身分辨識已停用 / 請照 config.example.json 補一份
-- Appended after mail    Gmail 需動作 1 封 / Waymo recruiter 問你有無興趣 / 另設定檔 names 是空的，身分辨識已停用
+- Config only    Gmail config problem / config.json is missing / identity matching is off / copy config.example.json to make one
+- Appended after mail    Gmail 1 action needed / Waymo recruiter asks whether you are interested / also config names is empty, identity matching is off
 
 ### 6. commit
 
@@ -510,18 +506,18 @@ First write this round's results to `Email_Check/round.json`.
 
 ```json
 {
-  "roundToken": "begin 回傳的那個字串，原樣照抄",
+  "roundToken": "the string begin returned, copied as is",
   "important": [{"id": "...", "from": "...", "subject": "...",
-                 "mailbox": "搜尋結果那兩欄，原樣照抄", "received": "...",
-                 "summary": "一行摘要"}],
-  "notifiedIds": ["toast 回了 Toast sent. 的 id"],
+                 "mailbox": "this and received copied as is from the search results", "received": "...",
+                 "summary": "one-line summary"}],
+  "notifiedIds": ["ids whose toast replied Toast sent."],
   "configAlerted": true,
-  "judgedIds": ["判定完成、不需要再追的 id"],
+  "judgedIds": ["ids fully judged that need no more follow-up"],
   "defer": [{"id": "...", "from": "...", "subject": "...", "mailbox": "...",
              "received": "...", "snippet": "..."}],
   "todos": [{"id": "...", "from": "...", "subject": "...", "mailbox": "...",
-             "received": "...", "action": "一行下一步動作",
-             "deadline": "2026-09-15 或空字串", "uncertain": false}]
+             "received": "...", "action": "one-line next action",
+             "deadline": "2026-09-15 or an empty string", "uncertain": false}]
 }
 ```
 
@@ -593,7 +589,7 @@ When the same message is also listed in `todos`, the script keeps only the todo 
 
 Set `configAlerted` to `true` only when this round's `begin` gave `config.alert` as true and that config-problem part was **definitely pushed successfully**. In every other case leave it out. `commit` uses it to decide whether to record the new config state, and recording it means the next round no longer alerts.
 
-`judgedIds` holds ids that **are fully judged and need no further queueing**, including those judged unimportant and those in `judgeOverdue` that already got a 「待確認」 notification. **This is the exit from the to-judge queue.** Leaving one out keeps that message queued, reappearing in `judgeNow` to be judged again every round. Mail judged important does not rely on it, since listing it in `important` moves it into the to-notify queue, as the table above shows.
+`judgedIds` holds ids that **are fully judged and need no further queueing**, including those judged unimportant and those in `judgeOverdue` that already got an "Unconfirmed" notification. **This is the exit from the to-judge queue.** Leaving one out keeps that message queued, reappearing in `judgeNow` to be judged again every round. Mail judged important does not rely on it, since listing it in `important` moves it into the to-notify queue, as the table above shows.
 
 `failedNotify` holds mail judged important whose toast reported failure or an unclear result. **The summary must be stored along with the id**, because after the watermark advances that message never appears in any query again, and with only the id the notification text can never be written.
 
@@ -602,14 +598,14 @@ Set `configAlerted` to `true` only when this round's `begin` gave `config.alert`
 - For `action`, use the same one line you were already going to write into the push, and **do not write a second version**. The judgment has already been made and this only lands the same result, so it adds almost no tokens
 - **Do not put the standalone exception for personal correspondence from a real person into todos.** That kind has no action to complete, so on the list it becomes noise that can never be ticked off. It is still pushed. It just does not go into `todos`
 - `deadline` uses the **full `YYYY-MM-DD`**, for example `2026-09-15`. With no deadline, fill in an empty string. The year is required. With only `09-15` the GUI cannot tell "just overdue last month" from "next September", and overdue items are exactly the ones that most need to sort first
-- `uncertain` is for the 「待確認 請自行開信」 kind, where information is insufficient but there are clues of something that must be done
+- `uncertain` is for the "Unconfirmed, open the mail yourself" kind, where information is insufficient but there are clues of something that must be done
 - **One item per message, keyed by message id.** Do not merge by subject or thread. The reverse holds too. When one message has several actions, combine them into this entry's `action` and never split them into two items with the same id, because the upsert would overwrite one of them. See the Check the calendar for events first section for details
 - **Mail whose salutation names someone else does not go into `todos`.** That is not the user's task
 - You **never need to delete a todo, and must never try to**. Only "user ticks + script cleanup" removes items. A message once marked `uncertain` that later turns out to be marketing stays for the user to tick off. Do not withdraw it automatically, since that could withdraw something the user still cares about
 
 **Write all three of `important`, `todos` and `defer` into `round.json` as soon as each batch is processed, not at the end.** `defer` is especially easy to overlook. A message that still cannot be judged after reading its body is neither `important` nor yet a `todo`, and `defer` is its only landing place. Once `step` retires the interval, the watermark crosses it, and if it has not landed by then it is gone for good. `step` commits the todos currently in `round.json` atomically together with the interval retirement. If you hold everything until the end to write it, a crash midway loses that batch's todos permanently while coverage has already moved past them.
 
-`defer` holds mail that still cannot be judged after reading the body, or whose body cannot be fetched at all. Store `from` / `subject` / `mailbox` / `received` / `snippet` rather than only the id, again because the context cannot be retrieved later. If the message later becomes a todo, `mailbox` and `received` can only be copied from here, since the watermark has already passed it. `firstDeferredRound` **must not be filled in by you**. The script keeps the earliest one. Filling it in yourself resets the waiting clock, so the "waited too long, send 待確認" rule never fires.
+`defer` holds mail that still cannot be judged after reading the body, or whose body cannot be fetched at all. Store `from` / `subject` / `mailbox` / `received` / `snippet` rather than only the id, again because the context cannot be retrieved later. If the message later becomes a todo, `mailbox` and `received` can only be copied from here, since the watermark has already passed it. `firstDeferredRound` **must not be filled in by you**. The script keeps the earliest one. Filling it in yourself resets the waiting clock, so the "waited too long, send Unconfirmed" rule never fires.
 
 Then run `... statemachine.py commit` with the Bash tool.
 
@@ -632,7 +628,7 @@ Among the fields `COMMITTED` returns, besides `shouldAnnounceBacklog` used in st
 **Treat all four as "this round did not finish", and do not assert whether it will fix itself.** One string covers two fates. `archive not writable` may mean another round changed the archive file at the same time and this one lost the version check (temporary), or that the file truly cannot be written (it will not fix itself). **The return value cannot tell which, and you must not guess.** Appearing several rounds in a row only means it is worth a look, not that the latter is confirmed, because each round losing a version check on its own also prints the exact same string. Relay it to the user as it is and let them decide whether to investigate.
 
 For a non-empty string, append that sentence to the end of the push to tell the user, and **push even if this round has no important mail**, because they will think they did not click it properly. Typical `archiveBlocked` values are `tick file unreadable` / `archive unreadable` / `archive not writable`, and the other two have a similar shape. Do not send a separate second push for them. Appending to the end of the same one is enough
-- `itemsMissingId` is how many queue items have no usable `id`. If nonzero, add the sentence 「有 N 筆缺 id 無法追蹤」 to the end of the push, but **do not send a separate push for it**, since it will not get better on its own and is not urgent
+- `itemsMissingId` is how many queue items have no usable `id`. If nonzero, `commit` also returns `missingIdNotice`, so add it verbatim to the end of the push, but **do not send a separate push for it**, since it will not get better on its own and is not urgent
 
 A nonzero `itemsMissingId` is almost always caused by some earlier round leaving out `id` in its report. Such items can never be deduped by id, ticked done or fetched back to read, so they just sit stuck in the queue. So the real point is **prevention**. See the rule above that every entry must carry the Gmail message `id`.
 
@@ -654,27 +650,27 @@ Drift happens because each of these cases reads like its opposite, so every entr
 |---|---|---|
 | A bank's credit card statement notice | **Is a todo** | A bill asks for something not yet done. The mail stating no amount or deadline does not change that. The next action is to log in, look and pay. Do not exclude it because it reads like a transaction record |
 | Pre-event reminder for Tesla Supercharging Your Resume Workshop | **Is a todo, but check the calendar first** | Having registered equals having committed. If it is already on the calendar, do not create a todo. What the user wants is to catch what is missing. Do not exclude it because it reads like event promotion or like a registration confirmation |
-| A volunteer team's 「煩請補交 Facebook 連結」, opening with `Hi Hsiao Ming` | **Not a todo, no push notification** | The greeting is someone else's name. That task is someone else's to do. Do not handle it as 「待確認」 (to be confirmed). Close it outright |
-| 「【行前通知】9/12 Taiwan Tech Summit 志工訓練」 from `Volunteer TaiwanNext <volunteer@taiwannext.org>`, opening with `Dear Taiwan Next Volunteers` | **Is a todo**, and the action is filling in the training registration form, not attending | Ruled on 2026-09-10. The original judgement of not important was wrong. Three dividing lines. One, **the word 「行前通知」 by itself means the user has already agreed to go**, since such mail presupposes the recipient is on the list. Two, `Dear ... Volunteers` is **a group greeting, not someone else's name**, unlike the `Hi Hsiao Ming` mail in the row above, and a group greeting is not evidence for exclusion. Three, the snippet is cut off right after the date, time and place, so **the thing to do comes later and cannot be seen**, and therefore mail like this must not be closed from the snippet. The user's own words were 「行前通知代表這是我會參加的活動，所以這其實是我要注意的事情」 |
+| A volunteer team's "please send in your Facebook link", opening with `Hi <someone else's name>` | **Not a todo, no push notification** | The greeting is someone else's name. That task is someone else's to do. Do not handle it as "Unconfirmed". Close it outright |
+| "[Pre-event notice] 9/12 Taiwan Tech Summit volunteer training" from `Volunteer TaiwanNext <volunteer@taiwannext.org>`, opening with `Dear Taiwan Next Volunteers` | **Is a todo**, and the action is filling in the training registration form, not attending | Ruled on 2026-09-10. The original judgement of not important was wrong. Three dividing lines. One, **the phrase pre-event notice, or one meaning the same, by itself means the user has already agreed to go**, since such mail presupposes the recipient is on the list. Two, `Dear ... Volunteers` is **a group greeting, not someone else's name**, unlike the `Hi <someone else's name>` mail in the row above, and a group greeting is not evidence for exclusion. Three, the snippet is cut off right after the date, time and place, so **the thing to do comes later and cannot be seen**, and therefore mail like this must not be closed from the snippet. The user's own words were "a pre-event notice means this is an event I will attend, so it is actually something I need to pay attention to" |
 | Application rejection letter | **Not important** | There is no next action, and it cannot change the outcome. A rejection written personally by a real person is likewise not notified |
-| Sign-in from some location, sign-in from a new device, confirm 「這是你嗎」 | **Not important** | Location alerts keep coming, in high volume, and are done once read. But a setting that has already been changed without the user having done it must be notified |
+| Sign-in from some location, sign-in from a new device, confirm "is this you" | **Not important** | Location alerts keep coming, in high volume, and are done once read. But a setting that has already been changed without the user having done it must be notified |
 | Handshake job alert pushes with the user's name in the subject | **Not important** | Marketing mail personalizes too. The name only identifies the recipient and is not an importance signal |
-| The ServiceNow Early in Career Recruiting Kick Offs invitation from `Lauren Martinez via Handshake` | **Is a todo** | Ruled on 2026-09-17. The original judgement of not important was wrong. Any **recruiting event the employer runs itself** is classed as important and goes into the task list, **without the user having to register first**, and neither an opening of `Hi there` that names no one nor a Register link counts toward exclusion. The dividing line is who runs it. One the employer runs itself counts, and solicitation by a third-party career fair organizer is still excluded. Being forwarded through Handshake does not matter, since the platform is only the delivery channel. The user's own words were 「只要判斷是招募的活動，就應該要歸類到重要的郵件，然後進待辦清單」 |
-| Share notification from `<某個人名> (Canva) <no-reply@canva.com>` | **Not important, no push notification** | In essence it says you gained a view or edit permission, and there is nothing to do. **The sender is not a real person.** The display name has a person's name but the address is `no-reply@`, and the sender is always judged by the actual address. If a real person sends the same share notification from their own mailbox, that counts as important and must be notified |
+| The ServiceNow Early in Career Recruiting Kick Offs invitation from `Lauren Martinez via Handshake` | **Is a todo** | Ruled on 2026-09-17. The original judgement of not important was wrong. Any **recruiting event the employer runs itself** is classed as important and goes into the task list, **without the user having to register first**, and neither an opening of `Hi there` that names no one nor a Register link counts toward exclusion. The dividing line is who runs it. One the employer runs itself counts, and solicitation by a third-party career fair organizer is still excluded. Being forwarded through Handshake does not matter, since the platform is only the delivery channel. The user's own words were "anything judged to be a recruiting event should be classed as important mail and go into the task list" |
+| Share notification from `<a person's name> (Canva) <no-reply@canva.com>` | **Not important, no push notification** | In essence it says you gained a view or edit permission, and there is nothing to do. **The sender is not a real person.** The display name has a person's name but the address is `no-reply@`, and the sender is always judged by the actual address. If a real person sends the same share notification from their own mailbox, that counts as important and must be notified |
 | A bank's monthly consolidated statement | **Is a todo** | The user will check whether the accounts are in order, so the action is to go through it once. The reason differs from a payment bill, but it is a todo all the same |
-| A card issuer's secure message center 「有新訊息請登入查看」 | **Not yet ruled, rules deliberately unchanged** | The user said this one is indeed important, but is unsure whether future mail with similar content will all be important, so no rule is set yet, and the decision waits until more samples accumulate. **Do not add a rule on your own, and do not file it under any existing category. For what to do before a ruling, see Cases not yet ruled on below** |
-| Mail carrying a one-time verification code | **Not important, no push notification** | Ruled on 2026-09-22. The user deals with it on the spot, and the code expires in minutes while the schedule may take as long as 8 hours 15 minutes to see it, so any todo created from it is always dead. **The dividing line is code versus link.** A verification link is still a todo as before, and when one mail gives both, treat it as a link. Notices that an account was actually changed are unaffected by this and are still notified. The user's own words were 「如果是有驗證碼 我覺得算例外 因為我通常當下就會處理 可以算在已處理裡面」 |
-| 「Thank You For Attending the Career Symposium!」 from Career Development Silicon Valley, whose body asks you to fill in a five-minute survey | **Not important, does not go into the task list, no push notification** | Ruled on 2026-09-24. The original judgement of todo was wrong. Feedback forms do not go into the task list, even when they come from the school and even when the user attended that event. **The exception stops at feedback forms.** Registration forms, requests to submit missing documents, attendance replies and any other form are still a todo. The user's own words were 「如果是 fill out survey 可以不用加到 代辦事項」, later adding 「不用加到代辦事項的表單只有意見回饋表單」 |
+| A card issuer's secure message center "you have a new message, please log in to view it" | **Not yet ruled, rules deliberately unchanged** | The user said this one is indeed important, but is unsure whether future mail with similar content will all be important, so no rule is set yet, and the decision waits until more samples accumulate. **Do not add a rule on your own, and do not file it under any existing category. For what to do before a ruling, see Cases not yet ruled on below** |
+| Mail carrying a one-time verification code | **Not important, no push notification** | Ruled on 2026-09-22. The user deals with it on the spot, and the code expires in minutes while the schedule may take as long as 8 hours 15 minutes to see it, so any todo created from it is always dead. **The dividing line is code versus link.** A verification link is still a todo as before, and when one mail gives both, treat it as a link. Notices that an account was actually changed are unaffected by this and are still notified. The user's own words were "a verification code I count as an exception, because I usually handle it on the spot, so it can count as already handled" |
+| "Thank You For Attending the Career Symposium!" from Career Development Silicon Valley, whose body asks you to fill in a five-minute survey | **Not important, does not go into the task list, no push notification** | Ruled on 2026-09-24. The original judgement of todo was wrong. Feedback forms do not go into the task list, even when they come from the school and even when the user attended that event. **The exception stops at feedback forms.** Registration forms, requests to submit missing documents, attendance replies and any other form are still a todo. The user's own words were "if it is a fill out survey it does not need to go into the todos", later adding "the only forms that do not need to go into the todos are feedback forms" |
 
 ### Cases not yet ruled on
 
 The rows marked "Not yet ruled" in the ruling table mean **the user has deliberately not set a rule yet**, not that one was left out. But having no rule does not mean having no behaviour, so what to do in the meantime is written here.
 
-**Judge it by the ordinary actionability test, and do not treat it specially because it has not been ruled on yet.** Take the card issuer's 「有新訊息請登入查看」 as an example. It has a next action addressed to the user (log in and look), so it passes the test and becomes a todo. That is the expected result.
+**Judge it by the ordinary actionability test, and do not treat it specially because it has not been ruled on yet.** Take the card issuer's "you have a new message, please log in to view it" as an example. It has a next action addressed to the user (log in and look), so it passes the test and becomes a todo. That is the expected result.
 
 **Do not do these three things**
 - Do not skip it or leave it un-notified because it is not yet ruled. That would keep samples from ever accumulating, and judging from samples that actually show up is exactly what the user wants
-- Do not mark it `uncertain` or 「待確認」. That is for mail the user definitely has to act on but whose details cannot all be seen, not for mail whose rule is not set yet
+- Do not mark it `uncertain` or "Unconfirmed". That is for mail the user definitely has to act on but whose details cannot all be seen, not for mail whose rule is not set yet
 - Do not add a row to the ruling table yourself, and do not file it under an existing category
 
 This default leans toward one extra todo rather than one missed mail, the same direction as the Top principle, so even if the final ruling is not important, the cost is only the user checking off a few items by hand.

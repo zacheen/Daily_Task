@@ -1,0 +1,16 @@
+{
+  "_comment": "Fixed sentences statemachine.py hands a round to send the user. Copy this file to add a language. language must equal report_language in shared/skill_deploy.toml, ignoring case. A sentence may be {\"one\": ..., \"other\": ...}, picked by whether {n} is 1. A key a file leaves out falls back to this file. Keep toast rules in mind, so no double quotes and no colons.",
+  "language": "English",
+  "notices": {
+    "stalled": {
+      "one": "Gmail check has not finished a round in 1 hour, mail may be piling up, check by hand",
+      "other": "Gmail check has not finished a round in {n} hours, mail may be piling up, check by hand"
+    },
+    "stuck": "Backlog catch-up is stuck, needs manual attention",
+    "backlog": "Older mail is still being scanned",
+    "missingId": {
+      "one": "1 item has no id and cannot be tracked",
+      "other": "{n} items have no id and cannot be tracked"
+    }
+  }
+}

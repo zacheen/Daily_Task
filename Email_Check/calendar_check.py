@@ -46,7 +46,8 @@ RRULE_SUPPORTED = {"FREQ", "BYDAY", "UNTIL", "INTERVAL", "WKST"}
 # Marks an event served from an expired cache entry. In-memory only, never
 # written to the cache file, and read only by lookup.
 STALE_TAG = "_fromExpiredCache"
-_NOISE = re.compile(r"[^0-9a-z一-鿿]+")
+# The last range is the CJK ideograph block, so a Chinese title is not erased.
+_NOISE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
 _STOP = {"the", "a", "an", "and", "or", "of", "for", "to", "your", "you",
          "invitation", "invite", "invited", "synced", "reminder", "workshop",
          "event", "live", "class", "session", "meeting", "webinar"}

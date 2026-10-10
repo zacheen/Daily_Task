@@ -29,6 +29,7 @@ import os
 import sys
 import tempfile
 import time
+import tomllib
 from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -91,6 +92,60 @@ ARCHIVE_TTL = 3 * 86400
 # Stands in for a rev that could not be read. Never equal to a real rev, so a
 # compare-and-swap against it always refuses the write.
 UNREADABLE_REV = "__unreadable__"
+# The fixed sentences a round sends the user, one file per language, so the
+# round copies a finished sentence in the report language instead of a Chinese
+# template that the language paragraph would tell it to keep as written.
+NOTICE_DIR = os.path.join(HERE, "notices")
+FALLBACK_NOTICES = os.path.join(NOTICE_DIR, "en.json")
+# Gitignored, so a fresh clone that has not copied it in gets the fallback.
+LANGUAGE_CONFIG = os.path.join(os.path.dirname(HERE), "shared", "skill_deploy.toml")
+
+
+def _load_notices() -> dict[str, Any]:
+    """The fallback's sentences with those of the file whose `language` equals
+    report_language, ignoring case, laid over them. The same rule as
+    load_locale in task_list/task_list_gui.py."""
+    def read(path: str) -> dict:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    fallback = read(FALLBACK_NOTICES)
+    try:
+        with open(LANGUAGE_CONFIG, "rb") as fh:
+            wanted = str(tomllib.load(fh).get("report_language", "")).strip().casefold()
+    except (OSError, tomllib.TOMLDecodeError):
+        wanted = ""
+    chosen: dict = {}
+    try:
+        names = sorted(n for n in os.listdir(NOTICE_DIR) if n.endswith(".json"))
+    except OSError:
+        names = []
+    for name in names:
+        data = read(os.path.join(NOTICE_DIR, name))
+        if wanted and str(data.get("language", "")).strip().casefold() == wanted:
+            chosen = data
+            break
+    out: dict[str, Any] = {}
+    for source in (fallback, chosen):
+        if isinstance(source.get("notices"), dict):
+            out.update(source["notices"])
+    return out
+
+
+def notice(key: str, n: int | None = None) -> str:
+    """A fixed sentence in the report language with {n} filled in. A {one,
+    other} entry picks its form by n. A key no file has comes back as itself,
+    so the toast shows the gap instead of going out empty."""
+    text = _load_notices().get(key)
+    if isinstance(text, dict):
+        text = (n == 1 and text.get("one")) or text.get("other")
+    if not isinstance(text, str):
+        return key
+    return text if n is None else text.replace("{n}", str(n))
 
 
 def read_config() -> dict[str, Any]:
@@ -1291,6 +1346,7 @@ def cmd_begin(_args) -> int:
     if stalled_for >= STALL_ALERT_SECONDS:
         out["coverageStalled"] = True
         out["stalledHours"] = stalled_for // 3600
+        out["stalledNotice"] = notice("stalled", out["stalledHours"])
     # Read, never written, so the GUI keeps sole ownership of the tick file.
     # An unreadable one falls back to pushing: a duplicate toast is recoverable,
     # a notification that is never sent is not.
@@ -1412,8 +1468,12 @@ def cmd_step(args) -> int:
     state.save()
     prog.save()
     nq = plan_query(state, prog)
-    emit({"status": "SEARCH" if nq else "DONE", "nextQuery": nq,
-          "stuck": prog.stuck, "backlogIntervals": len(state.coverage.intervals)})
+    out = {"status": "SEARCH" if nq else "DONE", "nextQuery": nq,
+           "stuck": prog.stuck, "backlogIntervals": len(state.coverage.intervals)}
+    # Each notice is present only when its sentence is owed, like stalledNotice.
+    if prog.stuck:
+        out["stuckNotice"] = notice("stuck")
+    emit(out)
     return 0
 
 
@@ -1515,6 +1575,14 @@ def cmd_commit(_args) -> int:
     state.lastCommitAt = now
     state.save()
     Progress.clear()
+    orphans = state.orphan_count()
+    notices = {}
+    if prog.stuck:
+        notices["stuckNotice"] = notice("stuck")
+    if announce:
+        notices["backlogNotice"] = notice("backlog")
+    if orphans:
+        notices["missingIdNotice"] = notice("missingId", orphans)
     emit({"status": "COMMITTED",
           "coveredThrough": state.coverage.covered_through,
           "backlogIntervals": len(state.coverage.intervals),
@@ -1541,7 +1609,8 @@ def cmd_commit(_args) -> int:
           "restoreBlocked": restore_blocked,
           "purgedFromArchive": purged,
           "archiveBlocked": archive_blocked,
-          "itemsMissingId": state.orphan_count()})
+          "itemsMissingId": orphans,
+          **notices})
     return 0
 
 

@@ -1,0 +1,9 @@
+{
+  "language": "Traditional Chinese",
+  "notices": {
+    "stalled": "Gmail 檢查已經 {n} 小時沒有跑完任何一輪，信可能正在累積，需人工檢查",
+    "stuck": "舊信追趕卡住 需人工處理",
+    "backlog": "尚有舊信未掃完",
+    "missingId": "有 {n} 筆缺 id 無法追蹤"
+  }
+}

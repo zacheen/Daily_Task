@@ -1,5 +1,5 @@
 """End-to-end scenario tests for the state machine, run against a temp copy."""
-import importlib.util, json, os, shutil, sys, tempfile
+import importlib.util, json, os, re, shutil, sys, tempfile
 
 # One level up, because the tests live in test/ and the code does not.
 CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -8,6 +8,12 @@ work = tempfile.mkdtemp(prefix="smtest.")
 shutil.copy(SRC, os.path.join(work, "statemachine.py"))
 spec = importlib.util.spec_from_file_location("sm", os.path.join(work, "statemachine.py"))
 sm = importlib.util.module_from_spec(spec); spec.loader.exec_module(sm)
+# The copy sits in a temp dir, so point it back at the real notice files, and
+# at a language config only the notice cases write, so every other case gets
+# the English fallback whatever this machine is set to.
+sm.NOTICE_DIR = os.path.join(CODE, "notices")
+sm.FALLBACK_NOTICES = os.path.join(sm.NOTICE_DIR, "en.json")
+sm.LANGUAGE_CONFIG = os.path.join(work, "skill_deploy.toml")
 
 _real_save = sm.State.save
 
@@ -1485,6 +1491,89 @@ st57 = sm.State({"horizon": 100, "roundSeq": 57,
 check("orphan_count counts id-less entries across the queues", st57.orphan_count() == 2,
       st57.orphan_count())
 
+# --- fixed sentences come finished, in the report language ---
+EN = json.load(open(sm.FALLBACK_NOTICES, encoding="utf-8"))["notices"]
+ZH = json.load(open(os.path.join(sm.NOTICE_DIR, "zh-TW.json"), encoding="utf-8"))["notices"]
+
+
+def holes(value):
+    forms = value.values() if isinstance(value, dict) else [value]
+    return set().union(*(re.findall(r"\{(\w+)\}", f) for f in forms))
+
+
+check("both notice files carry the same sentences", set(EN) == set(ZH), set(EN) ^ set(ZH))
+check("with the same placeholders", all(holes(EN[k]) == holes(ZH[k]) for k in EN),
+      {k: (holes(EN[k]), holes(ZH.get(k, ""))) for k in EN})
+forms = [f for v in list(EN.values()) + list(ZH.values())
+         for f in (v.values() if isinstance(v, dict) else [v])]
+check("no sentence can break the toast command, which takes no double quotes or colons",
+      not any('"' in f or ":" in f for f in forms), forms)
+
+
+def set_language(text):
+    _clear(sm.LANGUAGE_CONFIG)
+    if text is not None:
+        with open(sm.LANGUAGE_CONFIG, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+
+set_language('report_language = "Traditional Chinese"\n')
+check("a Traditional Chinese setting gets the Chinese sentence",
+      sm.notice("stuck") == ZH["stuck"], sm.notice("stuck"))
+check("with its number filled in",
+      sm.notice("missingId", 3) == ZH["missingId"].replace("{n}", "3"), sm.notice("missingId", 3))
+set_language('report_language = "english"\n')
+check("English picks the singular for one, ignoring case",
+      sm.notice("missingId", 1) == EN["missingId"]["one"], sm.notice("missingId", 1))
+check("and the plural otherwise",
+      sm.notice("missingId", 4) == EN["missingId"]["other"].replace("{n}", "4"),
+      sm.notice("missingId", 4))
+for text in ('report_language = "Klingon"\n', "report_language = \n", None):
+    set_language(text)
+    check(f"{text!r} falls back to English", sm.notice("backlog") == EN["backlog"],
+          sm.notice("backlog"))
+check("a key no file has comes back as itself", sm.notice("nope") == "nope")
+
+notice_out = []
+_was_notice_emit = sm.emit
+sm.emit = notice_out.append
+
+
+def commit_notices(intervals, todos, stuck, last_notice):
+    _clear(sm.STATE_PATH)
+    sm.State({"horizon": 100, "intervals": intervals, "roundSeq": 60, "todos": todos,
+              "lastBacklogNoticeRound": last_notice, "triageSince": 1}).save()
+    sm.Progress(200, stuck=stuck, config_seen="present").save()
+    json.dump({}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+    notice_out.clear()
+    sm.cmd_commit(None)
+    return notice_out[-1]
+
+
+owed = commit_notices([[100, 150]], [{"subject": "no id"}, {"subject": "nor this"}],
+                      [[120, 121]], 0)
+check("commit hands over every sentence it owes",
+      (owed.get("backlogNotice"), owed.get("missingIdNotice"), owed.get("stuckNotice"))
+      == (EN["backlog"], EN["missingId"]["other"].replace("{n}", "2"), EN["stuck"]), owed)
+quiet = commit_notices([], [{"id": "fine"}], [], 0)
+check("and none it does not owe",
+      not {"backlogNotice", "missingIdNotice", "stuckNotice"} & set(quiet), quiet)
+held_back = commit_notices([[100, 150]], [], [], 59)
+check("a backlog the throttle holds back carries no sentence either",
+      held_back["shouldAnnounceBacklog"] is False and "backlogNotice" not in held_back,
+      held_back)
+_clear(sm.STATE_PATH)
+sm.State({"horizon": 100, "intervals": [[120, 121]], "roundSeq": 61}).save()
+sm.Progress(200, config_seen="present").save()
+json.dump({}, open(sm.ROUND_PATH, "w", encoding="utf-8"))
+notice_out.clear()
+sm.cmd_step(type("A", (), {"failed": False, "lo": 120, "hi": 121, "count": sm.MAX_RESULTS})())
+check("step hands over the stuck sentence once a second cannot be split",
+      notice_out[-1]["stuck"] == [[120, 121]] and notice_out[-1].get("stuckNotice") == EN["stuck"],
+      notice_out[-1])
+sm.emit = _was_notice_emit
+_clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH, sm.LANGUAGE_CONFIG)
+
 # --- a ticked message is never pushed again ---
 # begin hands out notifications before commit consumes the ticks, so a round
 # used to push a toast for work the user had already marked done.
@@ -1633,6 +1722,10 @@ out_bad = begin_stall(NOW - 30 * 3600)
 check("thirty hours behind is a stall", out_bad["coverageStalled"] is True, out_bad)
 check("and the message has the elapsed hours to show",
       out_bad["stalledHours"] == 30, out_bad["stalledHours"])
+check("and comes finished, with the hours already in it",
+      out_bad["stalledNotice"]
+      == "Gmail check has not finished a round in 30 hours, mail may be piling up, check by hand"
+      and "stalledNotice" not in out_ok, out_bad.get("stalledNotice"))
 
 out_edge = begin_stall(NOW - 8 * 3600 - 30 * 60)
 check("the longest normal gap between schedules is not a stall",

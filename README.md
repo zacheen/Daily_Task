@@ -104,6 +104,7 @@ The two Gmail tasks share this folder. `gmail-check-0625` fires at 50 minutes pa
 
 - `INSTRUCTIONS.md`, the single rule file both tasks read. Their stubs only point to it
 - `statemachine.py`, everything that must be correct rather than judged, meaning the time window, coverage, watermark, dedupe queue and atomic writes
+- `notices/`, one file per language holding the fixed toast sentences `statemachine.py` hands a round, picked by `report_language` like the page's locales
 - `calendar_check.py`, which checks whether an event is already on the calendar through the secret iCal URLs in `config.json`
 - `task_list/task_list_gui.py`, the todo list page that open-task-list.ps1 starts. It exits on its own once no page is open
 - `task_list/locales/`, one file per page language. The page shows the one whose `language` matches `report_language`, and English when none does
@@ -112,7 +113,7 @@ The two Gmail tasks share this folder. `gmail-check-0625` fires at 50 minutes pa
 
 ## gmail_mcp/
 
-The read-only Gmail MCP server the two Gmail tasks search with, over IMAP with app passwords. It is registered at user scope as `gmail`, so every Claude Code session on this machine runs it from this folder, and moving the folder means registering it again with `claude mcp add gmail -s user`. The todo list page also imports its `origin_links` to build the link on each subject. Its own `README.md` covers setup, and it is written in Chinese.
+The read-only Gmail MCP server the two Gmail tasks search with, over IMAP with app passwords. It is registered at user scope as `gmail`, so every Claude Code session on this machine runs it from this folder, and moving the folder means registering it again with `claude mcp add gmail -s user`. The todo list page also imports its `origin_links` to build the link on each subject. Its own `README.md` covers setup.
 
 - `server.py`, the server and `origin_links`
 - `.env.example`, the tracked template for the gitignored `.env`, which holds both mailbox addresses and their app passwords

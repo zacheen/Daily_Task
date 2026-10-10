@@ -1,5 +1,5 @@
 {
-  "_comment": "config.json 的範本。config.json 被 gitignore，所以 schema 靠這個檔案留在版控裡。複製成 config.json 後填入實際內容。",
+  "_comment": "Template for config.json. config.json is gitignored, so this file is what keeps the schema in version control. Copy it to config.json and fill in the real values.",
   "names": {
     "latin": [
       "Given Family",
@@ -7,19 +7,19 @@
       "Preferred Name"
     ],
     "han": [
-      "中文姓名"
+      "<your name in Han characters>"
     ]
   },
   "excludedSenders": [
     "high-volume-sender@example.com"
   ],
-  "_excludedSenders_note": "每次搜尋都會加上 -from:<這裡的每一筆>。用來擋掉自己架的爬蟲或訂閱源那種一天幾十封、沒有一封需要通知的寄件人。放在這個 gitignore 的檔案裡而不是寫死在腳本裡，因為真實信箱地址不該進公開 remote。空陣列或讀不到都等於不排除，那個方向只是多花 token，不會漏信。",
+  "_excludedSenders_note": "Every search gets -from:<each entry here> added. It is for blocking senders such as a crawler or feed you run yourself, which send dozens of mails a day and none worth a notification. It lives in this gitignored file rather than in a script, because a real mailbox address must not reach the public remote. An empty array or an unreadable file means nothing is excluded, and that direction only costs extra tokens and never loses mail.",
   "excludedLabels": [
     "ignore"
   ],
-  "_excludedLabels_note": "每次搜尋都會加上 -label:<這裡的每一筆>，用來尊重使用者自己設的排除規則，標籤通常由 Gmail filter 在信件進來時自動掛上。掛了標籤就代表使用者已經對這一類信下過決定，不要再提醒，所以那封信連抓都不用抓。決定是預先下在規則上的，不是逐封看過，所以沒有標籤不代表使用者還沒看過那封信。省下的是省下的是每一輪重複判斷同一批信的 token。這比 excludedSenders 強，因為標籤可以只掛在某個寄件人的其中一封信上，而那個寄件人別的信照樣會進來。正因為這樣，標籤只能由使用者本人掛，排程的 LLM 不准自己推論要不要排除。多字的標籤會自動加引號。空陣列或讀不到都等於不排除，那個方向只是多花 token，不會漏信。",
+  "_excludedLabels_note": "Every search gets -label:<each entry here> added, to respect exclusion rules the user set up, usually labels a Gmail filter attaches as mail arrives. A label means the user has already decided about that kind of mail and wants no reminder, so the mail is not even fetched. The decision was made in advance on the rule, not by reading each mail, so a missing label does not mean the user has not seen that mail. What it saves is the tokens spent judging the same mails again every round. It is stronger than excludedSenders, because a label can sit on just one of a sender's mails while that sender's other mails still come in. For the same reason only the user may attach these labels, and the scheduled LLM must never infer on its own that something should be excluded. A label of several words is quoted automatically. An empty array or an unreadable file means nothing is excluded, and that direction only costs extra tokens and never loses mail.",
   "calendarIcsUrls": [
     "https://calendar.google.com/calendar/ical/.../private-.../basic.ics"
   ],
-  "_calendarIcsUrls_note": "Google 日曆設定 -> 選左邊那個日曆 -> 整合日曆 -> iCal 格式的私人網址。一個網址只涵蓋一個日曆，訂閱的群組日曆要各自加一條。這串網址等於密碼，拿到的人可以讀整個日曆，所以只放在這個 gitignore 的檔案裡。空陣列代表跳過日曆檢查，那時活動一律當成不在日曆。"
+  "_calendarIcsUrls_note": "Google Calendar settings -> pick the calendar on the left -> Integrate calendar -> Secret address in iCal format. One URL covers one calendar, so each subscribed group calendar needs its own entry. The URL works like a password, since anyone holding it can read the whole calendar, so it lives only in this gitignored file. An empty array skips the calendar check, and events are then always treated as not on the calendar."
 }

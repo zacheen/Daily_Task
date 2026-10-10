@@ -138,6 +138,8 @@ check("an Exchange origin gets subject, sender and day as one Outlook search, no
                            "From:noreply+news@sender.example AND received:9/14/2026"
       and got["222"].startswith(sv.OUTLOOK_SEARCH) and opened == ["scout"], (got, opened))
 
+# Keep the subject non-ASCII: an ASCII one is never RFC 2047 encoded, so the
+# test would pass with decoding never run. Chinese is what this mailbox gets.
 install([{"uid": b"7", "gm_msgid": "222",
           "headers": exchange_forward("=?utf-8?b?6YCZ5pivIDMg5YmH5ris6Kmm?=")}], [])
 got = query(sv.origin_links(["222"])["222"])
