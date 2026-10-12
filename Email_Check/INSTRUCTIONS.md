@@ -151,6 +151,7 @@ All four subcommands share this table. **Treat any status not in the table as an
 | `SEARCH_FAILED` | step | You reported a search failure, and the range is left for the next round | **Still send notifications for the backlog that step 2 already judged important**. Do not swallow confirmed important mail because the search for new mail failed |
 | `COMMITTED` | commit | This round has been committed atomically | Read its fields to wrap up (see steps 6 and 7), and this round ends |
 | `ABORT_STATE_CORRUPT` | begin / step / commit | `state.json` is corrupt | **Send a notification saying so, then end. Do not touch Gmail, and do not try to repair the state file** |
+| `INTERNAL_ERROR` | begin / wait / step / commit | The script hit an error it has no status for, and `detail` names it | **Send a notification saying so with `detail`, then end.** Do not rerun the command and do not try to repair any file |
 | `NO_ROUND_IN_PROGRESS` | step / commit | This round's `round-progress.json` is missing or unreadable | **Abandon this round and end quietly.** Do not rerun `begin`, do not send a notification |
 | `FINDINGS_UNREADABLE` | step / commit | `round.json` is unreadable, or the `roundToken` does not belong to this round | **Abandon this round and end quietly.** Do not retry the same `step`, and above all do not treat it as `DONE` |
 | `STATE_CHANGED_ABORT` | begin / step / commit | Another round wrote `state.json` after this round finished reading the state, so this round's write was blocked | **Abandon this round and end quietly.** Do not rerun, do not send a notification |
@@ -263,6 +264,8 @@ If the search errors or times out, retry once. If it still fails, report `... st
 **A search that completes with no output means zero messages, not a failure.** The tool returns an empty list when nothing matches, and the client shows that as no output at all. A failed search always comes back as an error, because the MCP raises rather than returning an empty list. So report no output as `--count 0` with the `--lo` and `--hi` of that query. Reporting it as `--failed` is not the safe side here. It keeps a range that was already scanned and sends a false backlog toast, which happened in one round when a 74-minute window really held no mail.
 
 Always look up the `status` from `step` in the master table at the start, and **it is likewise not repeated here**, for the same reason as in step 1. It may return any status whose subcommand column in the table includes step.
+
+When the output carries `boundsMismatch`, the `--lo` and `--hi` you reported were not those of the query the script last gave you, so it retired no range and keeps that period for another search. This batch's findings were still saved. Carry on with `nextQuery` as usual, and copy its bounds exactly next time.
 
 When `stuck` is not empty, it means more than 40 messages are packed into the same second and cannot be bisected any further. The same output then carries `stuckNotice`, and the notification must include it verbatim, because that will not resolve itself.
 

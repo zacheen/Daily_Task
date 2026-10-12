@@ -63,7 +63,7 @@ from flask import Flask, jsonify, request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # state.json lives one level up because statemachine.py owns it and the rest of
-# the Email_Check task reads it too. Only the six files below are this
+# the Email_Check task reads it too. The other data files below are this
 # folder's, which is also where _atomic_write puts its temp file.
 STATE_PATH = os.path.join(os.path.dirname(HERE), "state.json")
 CHECKED_PATH = os.path.join(HERE, "tasks-checked.json")
@@ -87,6 +87,8 @@ LINK_LOG_PATH = os.path.join(HERE, "mail-links.log")
 LINK_LOG_LINES = 200
 # Mirrors PRIORITIES in statemachine.py, most urgent first, which is the sort
 # order of the todo list. A todo with none of these is in triage.
+# test_task_list_gui_api.py checks this, ARCHIVE_TTL_DAYS, the file paths,
+# _usable_id and _is_remind_at against statemachine.py.
 PRIORITIES = ("urgent", "important", "normal")
 # Mirrors ARCHIVE_TTL in statemachine.py, for showing days remaining.
 ARCHIVE_TTL_DAYS = 3
@@ -100,8 +102,6 @@ MAX_REMIND_DAYS = 60
 # One file per page language, each naming in `language` the report_language it
 # serves.
 LOCALE_DIR = os.path.join(HERE, "locales")
-# Fills every key a matched locale leaves out, and serves the whole page when
-# none matches.
 FALLBACK_LOCALE = os.path.join(LOCALE_DIR, "en.json")
 # The setting that already picks the language the scheduled run writes in, so
 # following it keeps a row's action and the page around it in one language.
@@ -214,6 +214,26 @@ def _read_json(path: str, default):
         return default
 
 
+def _read_known(path: str, key: str) -> dict | None:
+    """The file's object, {} when the file does not exist, or None when it
+    exists but is not an object with a list, if anything, under `key`.
+
+    None means unknown, the state machine's rule for its own readers. Pruning
+    against an unreadable state.json or archive would read every queued click
+    as aimed at nothing and erase it.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get(key, []), list):
+        return None
+    return data
+
+
 def _atomic_write(path: str, payload) -> None:
     _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -237,7 +257,7 @@ def load_todos() -> list[dict]:
 
 
 def _next_rev() -> str:
-    """Monotonic-enough revision marker for the tick file."""
+    """Monotonic-enough revision marker for a request file."""
     return f"{time.time_ns()}"
 
 
@@ -290,13 +310,15 @@ def prune_requests(todos: list[dict]) -> tuple[set[str], dict[str, str], dict[st
     stored = {_usable_id(t): str(t.get("priority") or "") for t in rows}
     by_id = {_usable_id(t): t for t in rows}
 
-    archived_ids = {_usable_id(a) for a in _read_json(ARCHIVE_PATH, {}).get("archived", [])
-                    if isinstance(a, dict)}
-    wanted = load_restores()
-    live_restores = wanted & archived_ids
-    if live_restores != wanted:
-        _atomic_write(RESTORE_PATH,
-                      {"restoreIds": sorted(live_restores), "rev": _next_rev()})
+    archive = _read_known(ARCHIVE_PATH, "archived")
+    if archive is not None:
+        archived_ids = {_usable_id(a) for a in archive.get("archived", [])
+                        if isinstance(a, dict)}
+        wanted = load_restores()
+        live_restores = wanted & archived_ids
+        if live_restores != wanted:
+            _atomic_write(RESTORE_PATH,
+                          {"restoreIds": sorted(live_restores), "rev": _next_rev()})
 
     levels = load_triage()
     live_levels = {tid: lvl for tid, lvl in levels.items()
@@ -420,6 +442,7 @@ def index() -> str:
     table = json.dumps(strings, ensure_ascii=False).replace("</", "<\\/")
     # The table goes in last, so a placeholder spelled inside a string stays text.
     return (PAGE.replace("__PING_MS__", str(PING_EVERY_MS))
+                .replace("__ARCH_DAYS__", str(ARCHIVE_TTL_DAYS))
                 .replace("__FOLLOW_DAYS__", str(FOLLOW_ALERT_DAYS))
                 .replace("__MAX_REMIND__", str(MAX_REMIND_DAYS))
                 .replace("__LINK_POLL_MS__", str(LINK_POLL_MS))
@@ -729,7 +752,12 @@ def _link_fields(link: str) -> dict[str, str]:
 def api_todos():
     _touch(request.args.get("cid", ""))
     with _lock:
-        state = _read_json(STATE_PATH, {})
+        state = _read_known(STATE_PATH, "todos")
+        if state is None:
+            # Nothing is pruned and no cached link dropped, so the queued
+            # clicks are still there once the file reads again.
+            return jsonify({"todos": [], "archivedTotal": 0, "roundSeq": 0,
+                            "linksPending": False, "error": "state unreadable"})
         todos = [t for t in state.get("todos", []) if isinstance(t, dict)]
         checked, levels, follows = prune_requests(todos)
     links, linking = links_for([tid for tid in map(_usable_id, todos) if tid])
@@ -951,7 +979,7 @@ function tr(key, vars){
 }
 for(const n of document.querySelectorAll('[data-t]')) n.textContent = tr(n.dataset.t);
 document.title = tr('title');
-const ARCH_DAYS = 3;
+const ARCH_DAYS = __ARCH_DAYS__;
 const FOLLOW_DAYS = __FOLLOW_DAYS__;
 const MAX_REMIND = __MAX_REMIND__;
 // One id per page. The server counts open pages, so a second tab must not

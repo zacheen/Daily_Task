@@ -37,7 +37,11 @@ get_email_body(message_id, account="scout")
 
 The `query` of `search_emails` takes Gmail search syntax as is, for example `label:career_event in:anywhere`, `from:github.com` or `subject:interview newer_than:7d`.
 
-A search that finds nothing returns an empty list, which Claude Code shows as no output at all. A search that fails always raises and never returns an empty list as well. The scheduled check takes 0 messages to mean that time window has been scanned, so a failure read as 0 messages would leave the mail in that window unscanned forever. `get_latest_email` works the same way and raises on failure instead of reporting an empty inbox. The tests are in `test_search_emails.py`.
+A search that finds nothing returns an empty list, which Claude Code shows as no output at all. A search that fails always raises and never returns an empty list as well. The scheduled check takes 0 messages to mean that time window has been scanned, so a failure read as 0 messages would leave the mail in that window unscanned forever. `get_latest_email` works the same way and raises on failure instead of reporting an empty inbox.
+
+The fetch behind each hit follows the same rule. A fetch that fails, or that comes back without the message or without its `X-GM-MSGID`, raises rather than returning an empty or id-less row, because the scheduled check would count that row and then retire its window. `get_email_body` raises too, both when no message has the id and when the fetch fails, and it refuses an id that is not ASCII digits, since the id goes into the IMAP command unquoted. The tests are in `test_search_emails.py`.
+
+`max_results` is clamped to between 1 and `MAX_SEARCH_RESULTS`, which is 50. The scheduled check asks for `MAX_RESULTS` per page and reads a full page as a window to split, so `test_search_emails.py` checks that `MAX_RESULTS` stays under the clamp.
 
 Besides `subject` / `from` / `date` / `snippet`, the returned metadata carries `list_unsubscribe`. Bulk mail has this header and personal mail does not, which makes it the cleanest signal for whether a message is promotional.
 
@@ -51,7 +55,7 @@ The last one, `received`, is when this mailbox received the message, taken from 
 
 ## Mail links for the task list
 
-`origin_links(hub_ids)` is not an MCP tool. It is a function the `Daily_Task` task list page imports directly. It takes `scout` `X-GM-MSGID` values and returns a Gmail web link that opens the copy in the mailbox that originally received the message, so a reply goes out from the original address.
+`origin_links(hub_ids)` is not an MCP tool. It is a function the `Daily_Task` task list page imports directly. It takes `scout` `X-GM-MSGID` values and returns a Gmail web link that opens the copy in the mailbox that originally received the message, so a reply goes out from the original address. Importing `server.py` does not load the MCP SDK, which `build_server` imports only when the server is started, so the page's lookup does not wait on it.
 
 Gmail ids are tied to a mailbox, and a `scout` id opens nothing in the original mailbox. The two copies are matched by the `Message-ID` header, which forwarding leaves unchanged. It first reads that header and the original mailbox from `scout`. It then logs in to the original mailbox, finds that copy's `X-GM-THRID` with `rfc822msgid:`, converts it to hexadecimal and appends it after `#all/`, with the account picked by `authuser=`.
 

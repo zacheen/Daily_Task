@@ -13,6 +13,7 @@ Run with
 """
 
 import email
+import email.message
 import re
 import sys
 
@@ -168,6 +169,29 @@ check("the stamp is converted out of the sender's offset into local time",
 # rejects it, so this guards a TypeError and not a parse error.
 check("a prefix with no INTERNALDATE gives an empty string rather than raising",
       sv._received(b'1 (X-GM-MSGID 123 BODY[TEXT] {10}') == "")
+
+class Recording(email.message.Message):
+    """A header block with nothing in it that notes every header asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = set()
+
+    def get(self, name, failobj=None):
+        self.asked.add(name.upper())
+        return super().get(name, failobj)
+
+    def get_all(self, name, failobj=None):
+        self.asked.add(name.upper())
+        return super().get_all(name, failobj)
+
+
+# Empty headers walk every branch, since no stamp ends the search early.
+blank = Recording()
+sv._origin_mailbox(blank, HUB, ACCOUNT)
+fetched = set(sv.HEADER_FIELDS.split())
+check("every header _origin_mailbox reads is fetched, or it reads as absent",
+      blank.asked <= fetched, sorted(blank.asked - fetched))
 
 print()
 print("ALL PASS" if not fails else f"SOME FAIL  {fails}")

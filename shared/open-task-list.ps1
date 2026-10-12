@@ -16,9 +16,9 @@ Three things must not change:
   - never `conda run`, which waits for the child and would block the round
     until the user closes the page
 
-Deliberately ASCII-only: notify.ps1 must stay UTF-8 with BOM (Windows
-PowerShell 5.1 decodes a BOM-less .ps1 as system ANSI, mangling its Chinese
-default), so staying pure ASCII here means there is no BOM to lose.
+Deliberately ASCII-only: Windows PowerShell 5.1 decodes a BOM-less .ps1 as
+system ANSI, mangling any non-ASCII literal, as notify.ps1 explains, so
+staying pure ASCII here means there is no BOM to lose.
 
 Port 8765 already being in use needs no handling here. task_list_gui.py exits on
 its own in that case. It checks occupancy, not identity, so the usual cause is
@@ -28,7 +28,7 @@ the launch just the same.
 $ErrorActionPreference = "Stop"
 
 $python = Join-Path $env:USERPROFILE "miniconda3\envs\ML\pythonw.exe"
-$script = "D:\dont_move\git_save\Daily_Task\Email_Check\task_list\task_list_gui.py"
+$script = Join-Path (Split-Path $PSScriptRoot -Parent) "Email_Check\task_list\task_list_gui.py"
 
 # Reported rather than thrown: the caller is told to ignore this script's
 # output entirely, so a missing path is only ever read by a human running it
@@ -43,5 +43,7 @@ if (-not (Test-Path $script)) {
     exit 1
 }
 
-Start-Process -FilePath $python -ArgumentList $script -WindowStyle Hidden
+# Quoted, because Start-Process joins -ArgumentList into one command line and a
+# path with a space would reach Python as two arguments.
+Start-Process -FilePath $python -ArgumentList "`"$script`"" -WindowStyle Hidden
 Write-Output "Task list GUI launched."

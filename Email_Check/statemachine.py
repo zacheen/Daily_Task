@@ -16,6 +16,8 @@ INSTRUCTIONS.md maps each code to behaviour.
 
 Subcommands
     begin   start a round, return debts to settle and the first query
+    wait    after ROUND_ALREADY_RUNNING, poll the live round for its end
+    gate    answer SKIP or RUN for the prompt hook, reading state only
     step    record one search result, return the next query or done
     commit  apply the LLM's findings from round.json and persist atomically
 """
@@ -31,6 +33,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import traceback
 from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -77,6 +80,8 @@ WAIT_POLL_SECONDS = 10
 # slots 30 minutes apart, 45 minutes skips every other one.
 RECENT_COMMIT_SECONDS = 45 * 60
 JUDGE_WAIT_LIMIT_ROUNDS = 2
+# Leaves room in a 200-character toast for the round's own words around it.
+INTERNAL_DETAIL_CHARS = 150
 BACKLOG_NOTICE_EVERY = 3
 # The levels a todo can be filed under, most urgent first, which is also the
 # GUI's sort order. A todo with none of them is in triage and stays there until the
@@ -100,10 +105,10 @@ NOTICE_DIR = os.path.join(HERE, "notices")
 FALLBACK_NOTICES = os.path.join(NOTICE_DIR, "en.json")
 # Gitignored, so a fresh clone that has not copied it in gets the fallback.
 LANGUAGE_CONFIG = os.path.join(os.path.dirname(HERE), "shared", "skill_deploy.toml")
-# Temporary diagnostic, removed with the parts Pending_fix.md entry 2 lists. Reported deadlines in any shape but a
-# full date, kept to learn whether other notations ever turn up before the
-# parser is taught them. Covered by the repo's *.log ignore rule. Trimmed to
-# the last DEADLINE_LOG_LINES lines.
+# Temporary diagnostic, removed with the parts Pending_fix.md entry 2 lists.
+# Reported deadlines in any shape but a full date, kept to learn whether other
+# notations ever turn up before the parser is taught them. Covered by the
+# repo's *.log ignore rule. Trimmed to the last DEADLINE_LOG_LINES lines.
 DEADLINE_LOG_PATH = os.path.join(HERE, "deadline-unparsed.log")
 DEADLINE_LOG_LINES = 200
 FULL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -156,6 +161,23 @@ def notice(key: str, n: int | None = None) -> str:
     return text if n is None else text.replace("{n}", str(n))
 
 
+def calendar_urls(config: dict[str, Any]) -> list[str]:
+    """The usable feed URLs in a parsed config.json. calendar_check.py keeps
+    the same rule, and its test checks the two agree.
+
+    A lone string counts as a list of one, since that is the likely slip and
+    reading it as none would switch calendar checking off without a word. Any
+    other non-list counts as none rather than raising, which would fail every
+    begin until the file was fixed.
+    """
+    urls = config.get("calendarIcsUrls") or []
+    if isinstance(urls, str):
+        urls = [urls]
+    if not isinstance(urls, list):
+        return []
+    return [u for u in urls if isinstance(u, str) and u.startswith("https://")]
+
+
 def read_config() -> dict[str, Any]:
     """Health of config.json, reported by begin and remembered by commit.
 
@@ -182,8 +204,7 @@ def read_config() -> dict[str, Any]:
     if not isinstance(names, dict):
         names = {}
     count = sum(len(v) for v in names.values() if isinstance(v, list))
-    urls = data.get("calendarIcsUrls") or []
-    good = sum(1 for u in urls if isinstance(u, str) and u.startswith("https://"))
+    good = len(calendar_urls(data))
     return {"status": "present" if count else "incomplete",
             "names": count, "calendarUrls": good}
 
@@ -764,7 +785,7 @@ class State:
         LLM reports deltas and this layer owns the whole list.
 
         `checked` / `checkedRound` / `checkedAt` are never taken from a report,
-        so a message resurfacing from a park queue cannot undo a completion.
+        so a message resurfacing from a pending queue cannot undo a completion.
 
         Nothing writes those fields today. Tick state lives only in
         tasks-checked.json and consume_checked never stamps them back, so this
@@ -860,7 +881,8 @@ class State:
                 changed += 1
             elif want == "" and "priority" in todo:
                 del todo["priority"]
-                # Or filing it again later would drop it straight into follow-up.
+                # Follow fields go too, or filing it again later would drop it
+                # straight into follow-up.
                 for owned in FOLLOW_FIELDS:
                     todo.pop(owned, None)
                 changed += 1
@@ -908,6 +930,13 @@ class State:
             if (todo.get("followSince"), todo.get("followRemindAt")) != before:
                 changed += 1
         return changed, ""
+
+    def config_alert_owed(self, status: str) -> bool:
+        """Whether this config status still needs announcing. Only the move into
+        a fault, or from one fault to another, alerts, so a config left broken
+        does not push the same message every round. begin, gate and commit all
+        decide by this, so the gate cannot skip a round begin would alert in."""
+        return status != "present" and status != self.lastConfigStatus
 
     def untriaged_count(self) -> int:
         """Todos still in triage. An id-less one is left out, because the GUI
@@ -1018,6 +1047,10 @@ class State:
             self.notifiedIds = [x for x in self.notifiedIds
                                 if x != str(_usable_id(clean))]
 
+        # Saved before the archive drops them, the reverse of consume_checked,
+        # so a commit that then fails has the todo in both files rather than
+        # in neither. A stale state raises here, with the archive untouched.
+        self.save()
         if not _write_archive([a for a in archived
                                if _usable_id(a) not in wanted], rev):
             # The todo is already back on the list. A duplicate restore next
@@ -1093,8 +1126,13 @@ class State:
 class Progress:
     """Per-round scratch so step and commit agree on what begin set up."""
 
+    # `issued` of a progress file written before that field existed, whose step
+    # can go only by the bounds the LLM reports.
+    UNRECORDED = "unrecorded"
+
     def __init__(self, scan_end: int, searches: int = 0, stuck: list[list[int]] | None = None,
-                 token: str | None = None, config_seen: str = ""):
+                 token: str | None = None, config_seen: str = "",
+                 issued: list[int] | None | str = UNRECORDED):
         self.scan_end = scan_end
         self.searches = searches
         self.stuck = stuck or []
@@ -1104,14 +1142,26 @@ class Progress:
         # rather than trusting a stale copy. Defaulting to "" reads a
         # pre-upgrade file as drift, so the alert stays owed, not cleared.
         self.config_seen = config_seen
+        # The [lo, hi] of the query last handed out, which step retires or
+        # bisects instead of trusting the bounds the LLM copies back. None when
+        # no query is outstanding.
+        self.issued = issued
 
     @classmethod
     def load(cls) -> "Progress":
         with open(PROGRESS_PATH, encoding="utf-8") as fh:
             d = json.load(fh)
+        issued = d.get("issued", cls.UNRECORDED)
+        if isinstance(issued, list):
+            issued = [int(issued[0]), int(issued[1])]
         return cls(int(d["scanEnd"]), int(d.get("searches", 0)),
                    [list(x) for x in d.get("stuck", [])], d.get("token"),
-                   str(d.get("configSeen", "")))
+                   str(d.get("configSeen", "")), issued)
+
+    def issue(self, query: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Remember the bounds of the query about to go out, and pass it on."""
+        self.issued = [query["lo"], query["hi"]] if query else None
+        return query
 
     def save(self) -> None:
         """Same temp-file discipline as State.save. A torn write here used to be
@@ -1121,7 +1171,7 @@ class Progress:
         _atomic_json(PROGRESS_PATH, {
             "scanEnd": self.scan_end, "searches": self.searches,
             "stuck": self.stuck, "token": self.token,
-            "configSeen": self.config_seen})
+            "configSeen": self.config_seen, "issued": self.issued})
 
     @staticmethod
     def live_age(now: float) -> float | None:
@@ -1298,6 +1348,24 @@ def plan_query(state: State, prog: Progress) -> dict[str, Any] | None:
             "query": build_query(iv[0], iv[1])}
 
 
+def step_bounds(issued: list[int] | None | str, lo: int | None,
+                hi: int | None) -> list[int] | None:
+    """The range a step retires or bisects, or None to leave coverage alone.
+
+    The script handed the query out, so its own record of the bounds decides,
+    and the bounds the LLM copies back only cross-check it. A mismatch means
+    the count may belong to another query, and a count retired against the
+    wrong range loses that range's mail for good, while keeping the range only
+    repeats one search. None, with no query outstanding, keeps it the same way.
+    """
+    reported = None if lo is None or hi is None else [lo, hi]
+    if issued == Progress.UNRECORDED:
+        return reported
+    if issued is None:
+        return None
+    return issued if reported in (None, issued) else None
+
+
 def emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload))
 
@@ -1358,12 +1426,10 @@ def cmd_begin(_args) -> int:
 
     state.roundSeq += 1
     state.coverage.extend_to(now, BOUNDARY_SLACK)
-    # Only the transition into a fault alerts, so a config left broken does not
-    # repeatedly push the same message. The status itself is reported every
-    # round regardless, which is what keeps the fault visible in between.
+    # The status itself is reported every round, alert or not, which is what
+    # keeps the fault visible between alerts.
     cfg = read_config()
-    cfg["alert"] = (cfg["status"] != "present"
-                    and cfg["status"] != state.lastConfigStatus)
+    cfg["alert"] = state.config_alert_owed(cfg["status"])
     prog = Progress(now, config_seen=cfg["status"])
     # state.json goes first so that the rev check stops a losing begin before it
     # touches either round file. Two begins can both slip past the live-round
@@ -1377,6 +1443,7 @@ def cmd_begin(_args) -> int:
     # idempotent. Deleting it removes the argument.
     if os.path.exists(ROUND_PATH):
         os.unlink(ROUND_PATH)
+    next_query = prog.issue(plan_query(state, prog))
     prog.save()
 
     # cmd_step retires an interval by its query bounds, not by what it found, so
@@ -1407,7 +1474,7 @@ def cmd_begin(_args) -> int:
     ticked_now, tick_err, _ = _read_ticks()
     out.update(state.split_debt(set() if tick_err else ticked_now))
     out["config"] = cfg
-    out["nextQuery"] = plan_query(state, prog)
+    out["nextQuery"] = next_query
     emit(out)
     return 0
 
@@ -1456,8 +1523,7 @@ def gate_decision(now: int) -> dict[str, Any]:
     # the commit that ended it.
     if state.coverage.intervals:
         return {"status": "RUN", "reason": "unscanned intervals"}
-    config_status = read_config()["status"]
-    if config_status != "present" and config_status != state.lastConfigStatus:
+    if state.config_alert_owed(read_config()["status"]):
         return {"status": "RUN", "reason": "config alert owed"}
     return {"status": "SKIP", "lastCommitAgeSeconds": age}
 
@@ -1513,17 +1579,22 @@ def cmd_step(args) -> int:
     state.reconcile_judge(f.get("defer", []), set())
     state.reconcile_todos(f.get("todos", []), set())
 
-    if args.count >= MAX_RESULTS:
-        if not state.coverage.bisect(args.lo, args.hi):
-            prog.stuck.append([args.lo, args.hi])
+    bounds = step_bounds(prog.issued, args.lo, args.hi)
+    if bounds is None:
+        pass
+    elif args.count >= MAX_RESULTS:
+        if not state.coverage.bisect(*bounds):
+            prog.stuck.append(bounds)
     else:
-        state.coverage.retire(args.lo, args.hi)
+        state.coverage.retire(*bounds)
 
     state.save()
+    nq = prog.issue(plan_query(state, prog))
     prog.save()
-    nq = plan_query(state, prog)
     out = {"status": "SEARCH" if nq else "DONE", "nextQuery": nq,
            "stuck": prog.stuck, "backlogIntervals": len(state.coverage.intervals)}
+    if bounds is None:
+        out["boundsMismatch"] = True
     # Each notice is present only when its sentence is owed, like stalledNotice.
     if prog.stuck:
         out["stuckNotice"] = notice("stuck")
@@ -1586,9 +1657,9 @@ def cmd_commit(_args) -> int:
     reported_ids = {k for k in (_usable_id(t) for t in reported) if k is not None}
     filed = state.pushed_as_todos(
         [p for p in pushed if str(p.get("id")) not in ticked], reported_ids)
-    # A tick is the authoritative end of that message. Without clearing the park
-    # queues too, the next round would re-report it as debt and resurrect a todo
-    # the user already completed.
+    # A tick is the authoritative end of that message. Without clearing the
+    # pending queues too, the next round would re-report it as debt and
+    # resurrect a todo the user already completed.
     notified |= ticked
     resolved |= ticked
 
@@ -1618,8 +1689,7 @@ def cmd_commit(_args) -> int:
                     if int(t.get("createdRound", 0)) == state.roundSeq)
     untriaged = state.untriaged_count()
     config_status = read_config()["status"]
-    owed = (prog.config_seen != "present"
-            and prog.config_seen != state.lastConfigStatus)
+    owed = state.config_alert_owed(prog.config_seen)
     healed = config_status == "present"
     drifted = config_status != prog.config_seen
     acked = not owed or bool(findings.get("configAlerted"))
@@ -1676,15 +1746,30 @@ def main(argv: list[str]) -> int:
     sub.add_parser("gate").set_defaults(func=cmd_gate)
 
     sp = sub.add_parser("step")
-    sp.add_argument("--lo", type=int, default=0)
-    sp.add_argument("--hi", type=int, default=0)
+    sp.add_argument("--lo", type=int)
+    sp.add_argument("--hi", type=int)
     sp.add_argument("--count", type=int, default=0)
     sp.add_argument("--failed", action="store_true")
     sp.set_defaults(func=cmd_step)
 
     sub.add_parser("commit").set_defaults(func=cmd_commit)
     args = ap.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        # A traceback in place of the promised JSON leaves the round no status
+        # to look up in the table. The innermost line of this file stands in
+        # for the traceback, since a stdlib frame names no line here. The
+        # round puts detail in a toast of at most 200 characters that takes no
+        # colon or double quote, so it is cut short and carries neither.
+        frames = traceback.extract_tb(exc.__traceback__)
+        here = os.path.abspath(__file__)
+        where = next((f for f in reversed(frames) if os.path.abspath(f.filename) == here),
+                     frames[-1])
+        why = " ".join(re.sub(r'[":]', " ", str(exc)).split())
+        detail = f"{type(exc).__name__} in {where.name} line {where.lineno} {why}"
+        emit({"status": "INTERNAL_ERROR", "detail": detail.strip()[:INTERNAL_DETAIL_CHARS]})
+        return 2
 
 
 if __name__ == "__main__":

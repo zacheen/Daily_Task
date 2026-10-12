@@ -227,13 +227,14 @@ st12.reconcile_todos([{"id": "t1", "subject": "OA link", "action": "do the OA"}]
 check("todo created with context", st12.todos[0]["subject"] == "OA link", st12.todos)
 check("createdRound stamped", st12.todos[0]["createdRound"] == 6)
 
-# The GUI owns these three fields; a park-queue replay must not clear them.
+# Nothing stamps these fields today, so set them by hand. A replayed report
+# must not clear them.
 st12.todos[0]["checked"] = True
 st12.todos[0]["checkedRound"] = 6
 st12.reconcile_todos([{"id": "t1", "subject": "OA link", "checked": False}], set())
 check("a replay cannot un-complete a todo", st12.todos[0]["checked"] is True, st12.todos)
 
-# --- a tick is consumed, archived, and clears the park queues ---
+# --- a tick is consumed, archived, and clears the pending queues ---
 st13 = sm.State({"horizon": 100, "roundSeq": 7,
                  "todos": [{"id": "d1", "subject": "done one"},
                            {"id": "d2", "subject": "still open"}],
@@ -430,8 +431,8 @@ check("a deferred archive is not reported as a fault", why26 == "", why26)
 check("the un-ticked todo is still there",
       [t["id"] for t in st26.todos] == ["race1"], st26.todos)
 
-# --- both GUI-file readers report failure with the same shape ---
-# A third reader of a GUI-written file should have one obvious shape to copy,
+# --- the tick and archive readers report failure with the same shape ---
+# Another reader of a GUI-written file should have one obvious shape to copy,
 # and an unreadable file must never look like "nothing there".
 # This section rewrites two shared files, so it snapshots them first and
 # restores them at the end. Later sections build on rows earlier ones
@@ -508,7 +509,7 @@ check("but does not archive it twice",
 # All three are valid JSON, so json.load succeeds; _read_archive's own
 # isinstance guard (list of dicts) catches every shape before a row is ever
 # touched. The try/except is a regression guard against that check loosening,
-# since a row reaching _usable_id would raise uncaught with no JSON on stdout.
+# since a row reaching _usable_id would raise and abort the whole commit.
 for shape in ('{"archived": "not a list"}', '{"archived": [1, 2, 3]}',
               '{"archived": {}}'):
     st_bad = sm.State({"horizon": 100, "roundSeq": 19,
@@ -2011,6 +2012,187 @@ sm.emit = _was_gate_emit
 stamped = json.load(open(sm.STATE_PATH, encoding="utf-8")).get("lastCommitAt", 0)
 check("a successful commit records when it happened",
       now <= stamped <= int(_time.time()), stamped)
+
+# --- step retires the range it handed out, not the bounds copied back ---
+# A count reported against the wrong bounds would retire a range nobody
+# searched, and with the watermark past it that mail never comes back.
+bounds_out = []
+_was_bounds_emit, sm.emit = sm.emit, bounds_out.append
+NOWB = int(_time.time())
+OLD = [NOWB - 7200, NOWB - 6000]
+
+
+def begin_two_ranges():
+    """An old unscanned range sits below the one begin adds, so a wrong range
+    is there to be retired by mistake. Returns begin's output."""
+    bounds_out.clear()
+    _clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH)
+    sm.State({"horizon": NOWB - 600, "intervals": [list(OLD)], "roundSeq": 50}).save()
+    sm.cmd_begin(None)
+    return bounds_out[-1]
+
+
+def step_with(**fields):
+    bounds_out.clear()
+    args = {"failed": False, "lo": None, "hi": None, "count": 0}
+    args.update(fields)
+    sm.cmd_step(type("A", (), args)())
+    return bounds_out[-1]
+
+
+def disk_intervals():
+    return json.load(open(sm.STATE_PATH, encoding="utf-8"))["intervals"]
+
+
+out_b = begin_two_ranges()
+q = out_b["nextQuery"]
+check("begin records the bounds of the query it hands out",
+      json.load(open(sm.PROGRESS_PATH, encoding="utf-8"))["issued"] == [q["lo"], q["hi"]],
+      q)
+
+json.dump({"roundToken": out_b["roundToken"],
+           "todos": [{"id": "bm1", "subject": "found", "action": "reply"}]},
+          open(sm.ROUND_PATH, "w", encoding="utf-8"))
+before = disk_intervals()
+out_m = step_with(lo=OLD[0], hi=OLD[1], count=0)
+check("bounds that are not the issued query retire nothing",
+      disk_intervals() == before and out_m.get("boundsMismatch") is True, out_m)
+check("and the same query goes out again",
+      [out_m["nextQuery"]["lo"], out_m["nextQuery"]["hi"]] == [q["lo"], q["hi"]],
+      out_m["nextQuery"])
+check("while the batch's findings still land",
+      [t["id"] for t in json.load(open(sm.STATE_PATH, encoding="utf-8"))["todos"]] == ["bm1"])
+
+out_b = begin_two_ranges()
+q = out_b["nextQuery"]
+out_o = step_with(count=0)
+check("a step that omits the bounds retires the issued range",
+      disk_intervals() == [OLD] and "boundsMismatch" not in out_o, disk_intervals())
+
+out_b = begin_two_ranges()
+before = disk_intervals()
+step_with(lo=100, hi=400, count=sm.MAX_RESULTS)
+check("a full page against bounds that are no range splits nothing into being",
+      disk_intervals() == before, disk_intervals())
+
+# DONE once the search budget runs out, with OLD still unscanned.
+out_b = begin_two_ranges()
+q = out_b["nextQuery"]
+prog_b = sm.Progress.load()
+prog_b.searches = sm.MAX_SEARCHES_PER_ROUND - 1
+prog_b.save()
+out_d = step_with(lo=q["lo"], hi=q["hi"], count=0)
+check("the last step of the budget returns DONE with no query outstanding",
+      out_d["status"] == "DONE" and sm.Progress.load().issued is None, out_d)
+step_with(lo=OLD[0], hi=OLD[1], count=0)
+check("a step after DONE cannot retire a range nobody was given",
+      disk_intervals() == [OLD], disk_intervals())
+
+# A round in flight across the upgrade has a progress file without the field.
+json.dump({"scanEnd": NOWB, "token": "legacy"}, open(sm.PROGRESS_PATH, "w", encoding="utf-8"))
+check("a progress file from before issued existed goes by the reported bounds",
+      sm.step_bounds(sm.Progress.load().issued, 1, 2) == [1, 2])
+sm.emit = _was_bounds_emit
+
+# --- a restore that a failed commit abandons is kept in one of the two files ---
+# The restore leaves the archive before commit's own save, so that save failing
+# used to leave the todo in neither file.
+restore_out = []
+_was_restore_emit, sm.emit = sm.emit, restore_out.append
+_clear(sm.STATE_PATH, sm.ROUND_PATH, sm.PROGRESS_PATH, sm.CHECKED_PATH,
+       sm.TRIAGE_PATH, sm.FOLLOW_PATH)
+sm.State({"horizon": 100, "roundSeq": 60}).save()
+_write_archive([{"id": "rx", "subject": "restore me", "priority": "normal",
+                 "archivedAt": int(_time.time())}])
+json.dump({"restoreIds": ["rx"]}, open(sm.RESTORE_PATH, "w", encoding="utf-8"))
+sm.Progress(200, config_seen="present").save()
+
+
+def last_save_fails(self):
+    """commit stamps lastCommitAt just before its own save, so only that one fails."""
+    if self.lastCommitAt:
+        raise sm.StaleStateError("another round wrote state.json")
+    return _test_save(self)
+
+
+sm.State.save = last_save_fails
+rc = sm.cmd_commit(None)
+sm.State.save = _test_save
+on_list = [t["id"] for t in json.load(open(sm.STATE_PATH, encoding="utf-8"))["todos"]]
+in_archive = [a["id"] for a in _read_arch()]
+check("a commit that fails after a restore aborts as documented",
+      rc == 2 and restore_out[-1]["status"] == "STATE_CHANGED_ABORT", restore_out[-1])
+check("and the restored todo is still on the list or still archived",
+      "rx" in on_list or "rx" in in_archive, (on_list, in_archive))
+
+# Another round saved first, so the restore's own save refuses before the
+# archive is touched.
+st_r = sm.State.load_or_init(int(_time.time()))[0]
+sm.State({"horizon": 100, "roundSeq": 61}).save()
+_write_archive([{"id": "rx", "subject": "restore me", "archivedAt": int(_time.time())}])
+try:
+    st_r.consume_restores()
+    check("a restore against a stale state raises", False)
+except sm.StaleStateError:
+    check("a restore against a stale state leaves the archive alone",
+          [a["id"] for a in _read_arch()] == ["rx"], _read_arch())
+_clear(sm.RESTORE_PATH)
+sm.emit = _was_restore_emit
+
+# --- an error with no status of its own still answers in JSON ---
+# Raised from a stand-in called by load_or_abort, so the innermost frame of
+# statemachine.py is load_or_abort's own call line, not main's or the test's.
+crash_out = []
+_was_crash_emit, sm.emit = sm.emit, crash_out.append
+_src = open(SRC, encoding="utf-8").read().splitlines()
+CALL_LINE = next(i for i, line in enumerate(_src, 1)
+                 if line.strip() == "return State.load_or_init(now)")
+
+
+def _crash(message):
+    def load(now):
+        raise KeyError(message)
+    return load
+
+
+sm.State.load_or_init = staticmethod(_crash("x"))
+rc = sm.main(["commit"])
+check("an unexpected exception becomes INTERNAL_ERROR at the line of this file it hit",
+      rc == 2 and crash_out[-1]["status"] == "INTERNAL_ERROR"
+      and crash_out[-1]["detail"].startswith(f"KeyError in load_or_abort line {CALL_LINE} "),
+      crash_out[-1])
+sm.State.load_or_init = staticmethod(_crash('say "x": ' + "y" * 400))
+sm.main(["commit"])
+check("and its detail fits a toast, with no colon or double quote and cut short",
+      not re.search(r'[":]', crash_out[-1]["detail"])
+      and len(crash_out[-1]["detail"]) <= sm.INTERNAL_DETAIL_CHARS, crash_out[-1])
+sm.State.load_or_init = _real_load
+sm.emit = _was_crash_emit
+
+# --- every status a round can get is in INSTRUCTIONS' table, and only those ---
+# The table is the round's whole contract, and a status missing from it once
+# sent false alarms.
+import ast as _ast
+_tree = _ast.parse(open(SRC, encoding="utf-8").read())
+emitted = set()
+for _fn in _tree.body:
+    # gate answers the hook, never a round.
+    if isinstance(_fn, _ast.FunctionDef) and _fn.name in ("gate_decision", "cmd_gate"):
+        continue
+    for _node in _ast.walk(_fn):
+        if isinstance(_node, _ast.Dict):
+            for _k, _v in zip(_node.keys, _node.values):
+                if isinstance(_k, _ast.Constant) and _k.value == "status":
+                    emitted |= {n.value for n in _ast.walk(_v) if isinstance(n, _ast.Constant)
+                                and isinstance(n.value, str) and re.fullmatch(r"[A-Z_]+", n.value)}
+_doc = open(os.path.join(CODE, "INSTRUCTIONS.md"), encoding="utf-8").read()
+_start = _doc.index("### Statuses the script returns")
+_table = _doc[_start:_doc.index("\n#", _start + 1)]
+documented = set(re.findall(r"^\| `([A-Z_]+)` \|", _table, re.M))
+check("every status the script emits has a row in the table",
+      emitted <= documented, sorted(emitted - documented))
+check("and every row names a status the script emits",
+      documented <= emitted, sorted(documented - emitted))
 
 # --- corrupt state must abort, never invent a watermark ---
 open(sm.STATE_PATH, "w").write("{ not json")

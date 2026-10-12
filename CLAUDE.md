@@ -2,7 +2,10 @@
 
 ## Tests to run after changing code
 
-The five files under `Email_Check/test/` run directly as files, with no pytest, and take about 36 seconds in total. After changing `statemachine.py`, `task_list/task_list_gui.py` or `calendar_check.py`, run the matching one.
+The five files under `Email_Check/test/` run directly as files, with no pytest, and take about a minute in total. After changing `statemachine.py`, `task_list/task_list_gui.py` or `calendar_check.py`, run the matching one. Some of them also check one file against another, so run these as well when either side changes.
+- `test_task_list_gui_api.py` checks that the page agrees with `statemachine.py` on the files, levels and id rules they share, and with `gmail_mcp/server.py` on the link prefixes.
+- `test_calendar_check.py` checks that `calendar_check.py` reads `calendarIcsUrls` the way `statemachine.py` does.
+- `test_statemachine.py` checks that every status the script emits has a row in the status table of `INSTRUCTIONS.md`, and that every row names one it emits.
 
 ```
 conda run -n ML --no-capture-output python "D:\dont_move\git_save\Daily_Task\Email_Check\test\test_statemachine.py"
@@ -12,7 +15,7 @@ conda run -n ML --no-capture-output python "D:\dont_move\git_save\Daily_Task\Ema
 
 After changing `shared/deploy_skills.py`, run `shared/test_deploy_skills.py` the same way. It works only inside a temporary directory and never touches the real scheduled tasks.
 
-After changing `gmail_mcp/server.py`, run `gmail_mcp/test_origin_mailbox.py`, `gmail_mcp/test_origin_links.py` and `gmail_mcp/test_search_emails.py` the same way. All three use fake headers or a fake IMAP, so they need no network and no credentials. `gmail_mcp/server.py --check` is the live check, which logs in to both mailboxes and prints only their status.
+After changing `gmail_mcp/server.py`, run `gmail_mcp/test_origin_mailbox.py`, `gmail_mcp/test_origin_links.py` and `gmail_mcp/test_search_emails.py` the same way. All three use fake headers or a fake IMAP, so they need no network and no credentials. `test_search_emails.py` also checks that `MAX_RESULTS` in `statemachine.py` fits under the server's `MAX_SEARCH_RESULTS`. `gmail_mcp/server.py --check` is the live check, which logs in to both mailboxes and prints only their status.
 
 ## Do not edit a scheduled task's SKILL.md directly
 

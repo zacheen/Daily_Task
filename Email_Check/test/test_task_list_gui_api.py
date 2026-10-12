@@ -2,8 +2,7 @@
 
 test_task_list_gui.py only covers the pure helpers, so /api/archive and /api/restore
 had no net at all. That is exactly where two comments drifted out of date
-through three review rounds, because nowhere else could an assertion fail. The
-triage endpoint arrives with one from the start.
+through three review rounds, because nowhere else could an assertion fail.
 
 Flask's test client is used rather than a real server, so nothing binds a port
 and the watchdog never runs.
@@ -28,8 +27,8 @@ tg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tg)
 
 work = tempfile.mkdtemp(prefix="guiapi.")
-# HERE too, not just the paths: _atomic_write puts its temp file beside the
-# target, so leaving it pointed at the project would litter the real directory.
+# HERE too, not just the paths: _atomic_write puts its temp file in HERE, so
+# leaving it pointed at the project would litter the real directory.
 tg.HERE = work
 tg.STATE_PATH = os.path.join(work, "state.json")
 tg.CHECKED_PATH = os.path.join(work, "tasks-checked.json")
@@ -571,8 +570,105 @@ check("an Outlook search survives a reload from the cache file",
 reset_links(lambda ids: {})
 clear(tg.STATE_PATH, tg.LINKS_PATH)
 
+# --- an unreadable state.json or archive is unknown, not empty ---
+# Pruned against as empty, every queued click would read as aimed at nothing.
+QUEUED = {tg.CHECKED_PATH: {"checkedIds": ["q1"], "rev": "1"},
+          tg.TRIAGE_PATH: {"levels": {"q2": "urgent"}, "rev": "1"},
+          tg.FOLLOW_PATH: {"follow": {"q3": True}, "rev": "1"},
+          tg.RESTORE_PATH: {"restoreIds": ["a1"], "rev": "1"},
+          tg.LINKS_PATH: {"version": tg.LINKS_VERSION, "links": {"q1": LINK}}}
+for label, text in (("torn", "{ truncated"), ("not an object", "[]"),
+                    ("todos that are not a list", '{"todos": {"q1": {}}}')):
+    for path, payload in QUEUED.items():
+        write(path, payload)
+    write(tg.ARCHIVE_PATH, {"archived": [{"id": "a1"}]})
+    open(tg.STATE_PATH, "w", encoding="utf-8").write(text)
+    reset_links(answering)
+    d = cli.get("/api/todos").get_json()
+    settle()
+    check(f"a {label} state.json serves no rows and says why",
+          d["todos"] == [] and d.get("error") == "state unreadable", d)
+    check(f"and leaves every queued click and cached link alone ({label})",
+          all(read(path) == payload for path, payload in QUEUED.items()),
+          {os.path.basename(p): read(p) for p in QUEUED})
+
+write(tg.STATE_PATH, {"todos": [{"id": "q1"}, {"id": "q2"}, {"id": "q3", "priority": "normal"}]})
+write(tg.RESTORE_PATH, {"restoreIds": ["a1"], "rev": "1"})
+open(tg.ARCHIVE_PATH, "w", encoding="utf-8").write("{ truncated")
+cli.get("/api/todos")
+settle()
+check("an unreadable archive leaves a queued restore alone",
+      read(tg.RESTORE_PATH)["restoreIds"] == ["a1"], read(tg.RESTORE_PATH))
+reset_links(lambda ids: {})
+clear(tg.STATE_PATH, tg.ARCHIVE_PATH, tg.CHECKED_PATH, tg.RESTORE_PATH, tg.TRIAGE_PATH,
+      tg.FOLLOW_PATH, tg.LINKS_PATH)
+
+# --- the page and statemachine.py agree on every file they share ---
+# Each side's own tests rebind its paths, so a renamed request file or a level
+# added on one side only would pass both suites and break the real pair.
+fresh_spec = importlib.util.spec_from_file_location("tg_fresh", SRC)
+tg_fresh = importlib.util.module_from_spec(fresh_spec)
+fresh_spec.loader.exec_module(tg_fresh)
+sm_spec = importlib.util.spec_from_file_location("sm", os.path.join(CODE, "statemachine.py"))
+sm = importlib.util.module_from_spec(sm_spec)
+sm_spec.loader.exec_module(sm)
+SHARED = ("STATE_PATH", "CHECKED_PATH", "ARCHIVE_PATH", "RESTORE_PATH", "TRIAGE_PATH",
+          "FOLLOW_PATH")
+check("both sides name the same six files",
+      all(getattr(tg_fresh, n) == getattr(sm, n) for n in SHARED),
+      [n for n in SHARED if getattr(tg_fresh, n) != getattr(sm, n)])
+check("both sides have the same levels in the same order", tg.PRIORITIES == sm.PRIORITIES)
+check("both sides keep an archived todo equally long",
+      tg.ARCHIVE_TTL_DAYS * 86400 == sm.ARCHIVE_TTL)
+for raw in ("abc", " abc ", "", "  ", "None", "null", "NULL", 0, 17, None, False):
+    check(f"both sides read id {raw!r} the same",
+          tg._usable_id({"id": raw}) == sm._usable_id({"id": raw}))
+for raw in (1, 0, -5, True, False, 1.5, "17", None, 10 ** 12):
+    check(f"both sides read remind value {raw!r} the same",
+          tg._is_remind_at(raw) == sm._is_remind_at(raw))
+
+# Every verb the page queues, consumed by the real state machine.
+for name in SHARED + ("ROUND_PATH", "PROGRESS_PATH", "CONFIG_PATH", "DEADLINE_LOG_PATH"):
+    setattr(sm, name, os.path.join(work, os.path.basename(getattr(sm, name))))
+write(tg.STATE_PATH, {"horizon": 100, "todos": [
+    {"id": "c1", "subject": "done", "priority": "normal"},
+    {"id": "l1", "subject": "file me"},
+    {"id": "f1", "subject": "wait on them", "priority": "important"}]})
+write(tg.ARCHIVE_PATH, {"archived": [{"id": "r1", "subject": "bring back",
+                                      "priority": "normal", "archivedAt": int(time.time())}]})
+cli.post("/api/check", json={"id": "c1", "checked": True})
+cli.post("/api/triage", json={"id": "l1", "level": "important"})
+cli.post("/api/follow", json={"id": "f1", "follow": True})
+remind_at = cli.post("/api/remind", json={"id": "f1", "days": 2}).get_json()["remindAt"]
+cli.post("/api/restore", json={"id": "r1"})
+st = sm.State.load_or_init(int(time.time()))[0]
+back, _ = st.consume_restores()
+done, _ = st.consume_checked()
+triaged, _ = st.consume_triage()
+followed, _ = st.consume_follow(int(time.time()))
+todos = {t["id"]: t for t in st.todos}
+check("a queued restore is consumed", [b["id"] for b in back] == ["r1"] and "r1" in todos)
+check("a queued tick is consumed", [x["id"] for x in done] == ["c1"] and "c1" not in todos)
+check("a queued level is consumed", triaged == 1 and todos["l1"]["priority"] == "important")
+check("a queued reminder is consumed as follow-up with its moment",
+      followed == 1 and "followSince" in todos["f1"]
+      and todos["f1"].get("followRemindAt") == remind_at, todos["f1"])
+clear(tg.STATE_PATH, tg.ARCHIVE_PATH, tg.CHECKED_PATH, tg.RESTORE_PATH, tg.TRIAGE_PATH,
+      tg.FOLLOW_PATH)
+
+# --- the page's link prefixes match what gmail_mcp builds ---
+sv_spec = importlib.util.spec_from_file_location("gmail_server", tg.GMAIL_MCP)
+sv = importlib.util.module_from_spec(sv_spec)
+sv_spec.loader.exec_module(sv)
+check("the Outlook search prefix is the one origin_links builds",
+      tg.OUTLOOK_SEARCH == sv.OUTLOOK_SEARCH, (tg.OUTLOOK_SEARCH, sv.OUTLOOK_SEARCH))
+check("a Gmail link origin_links builds passes the cache's prefix check",
+      sv.GMAIL_LINK.startswith(tg.GMAIL_WEB), (sv.GMAIL_LINK, tg.GMAIL_WEB))
+
 # --- the page: triage above the todo list, and only triage offers the levels ---
 page = tg.index()
+check("every placeholder in the page is filled in",
+      not re.search(r"__[A-Z_]+__", page), re.findall(r"__[A-Z_]+__", page))
 check("the sections run triage, todo list, follow-up, archive",
       page.index("id=secnew") < page.index("id=secold") < page.index("id=secfollow")
       < page.index("id=secarch"))

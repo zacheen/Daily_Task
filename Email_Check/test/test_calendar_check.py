@@ -1,4 +1,4 @@
-"""Tests for the calendar lookup. Pure functions only, no network."""
+"""Tests for the calendar lookup. Feeds are faked, so no network is touched."""
 
 import datetime as dt
 import importlib.util
@@ -159,6 +159,20 @@ open(bad, "w", encoding="utf-8").write('{"calendarIcsUrls": ["http://insecure/a.
 check("a non-https url is not usable",
       cc.load_urls() == ([], "no usable calendarIcsUrls in config.json"),
       cc.load_urls())
+
+# begin reports calendarUrls through statemachine.calendar_urls, so a shape the
+# two read differently would show a count the lookup then disagrees with.
+sm_spec = importlib.util.spec_from_file_location("sm", os.path.join(CODE, "statemachine.py"))
+sm = importlib.util.module_from_spec(sm_spec)
+sm_spec.loader.exec_module(sm)
+for urls in (["https://a/x.ics", "http://b/y.ics", 7], "https://a/x.ics", "http://b/y.ics",
+             5, True, None, {"u": "https://a/x.ics"}, []):
+    open(bad, "w", encoding="utf-8").write(json.dumps({"calendarIcsUrls": urls}))
+    got = cc.load_urls()[0]
+    check(f"calendarIcsUrls {urls!r} reads the same in begin and the lookup",
+          got == sm.calendar_urls({"calendarIcsUrls": urls}), got)
+check("a lone url string counts as a list of one",
+      sm.calendar_urls({"calendarIcsUrls": "https://a/x.ics"}) == ["https://a/x.ics"])
 cc.CONFIG_PATH = os.path.join(os.path.dirname(SRC), "config.json")
 
 # A partially failed fetch also cannot prove absence.

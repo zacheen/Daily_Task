@@ -118,9 +118,14 @@ def read_state(path):
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise DeployError(f"{path} is not valid JSON ({error}), fix or delete it") from error
+    # Valid JSON of another shape would otherwise crash later, uncaught, and
+    # exit 1, which this tool already uses for "a task needs attention".
+    if not isinstance(data, dict):
+        raise DeployError(f"{path} is not a JSON object, fix or delete it")
+    return data
 
 
 def write_atomic(path, data):

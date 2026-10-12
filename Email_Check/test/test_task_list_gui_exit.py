@@ -43,16 +43,19 @@ PY = sys.executable
 RUNNER = os.path.join(WORK, "runner.py")
 with open(RUNNER, "w", encoding="utf-8", newline="\n") as fh:
     fh.write(
-        "import importlib.util, sys, threading, time\n"
+        "import importlib.util, os, sys, threading, time\n"
         "spec = importlib.util.spec_from_file_location('tg', %r)\n"
         "tg = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(tg)\n"
-        # The runner serves the real state.json, so without these every poll
-        # would log in to the real mailboxes, and the stub's empty answers
-        # would be saved over the real link cache as "no link".
+        # The state, archive, request and link files are moved into WORK, HERE
+        # included for its temp files. Left on the real ones, each poll prunes
+        # the user's queued clicks outside the real page's lock. The stub keeps
+        # a poll from logging in to the real mailboxes.
         "tg._lookup_links = lambda ids: {}\n"
-        "tg.LINKS_PATH = %r\n"
-        "tg.LINK_LOG_PATH = %r\n"
+        "for name in ('HERE', 'STATE_PATH', 'CHECKED_PATH', 'ARCHIVE_PATH', 'RESTORE_PATH',\n"
+        "             'TRIAGE_PATH', 'FOLLOW_PATH', 'LINKS_PATH', 'LINK_LOG_PATH'):\n"
+        "    setattr(tg, name, %r if name == 'HERE' else\n"
+        "            os.path.join(%r, os.path.basename(getattr(tg, name))))\n"
         "tg.STARTUP_GRACE = float(sys.argv[2])\n"
         "tg.CLIENT_TIMEOUT = float(sys.argv[3])\n"
         "tg.WATCHDOG_TICK = 0.4\n"
@@ -60,7 +63,7 @@ with open(RUNNER, "w", encoding="utf-8", newline="\n") as fh:
         "threading.Thread(target=tg._watchdog, daemon=True).start()\n"
         "tg.app.run(host='127.0.0.1', port=int(sys.argv[1]),\n"
         "           debug=False, use_reloader=False)\n"
-        % (SRC, os.path.join(WORK, "mail-links.json"), os.path.join(WORK, "mail-links.log")))
+        % (SRC, WORK, WORK))
 
 fails = []
 

@@ -27,7 +27,6 @@ from pathlib import Path
 from urllib.parse import quote
 
 from dotenv import dotenv_values
-from mcp.server import MCPServer
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
@@ -46,19 +45,23 @@ IMAP_PORT = 993
 IMAP_TIMEOUT = 30
 # Outlook on the web reads no search from its URL (six forms tried 2026-10-02),
 # so the query rides in the fragment and the todo page copies it to the
-# clipboard. The todo page mirrors this prefix.
+# clipboard. The todo page mirrors this prefix, and its GMAIL_WEB must prefix
+# GMAIL_LINK. Email_Check/test/test_task_list_gui_api.py checks both.
 OUTLOOK_SEARCH = "https://outlook.office.com/mail/#q="
+GMAIL_LINK = "https://mail.google.com/mail/"
+# search_emails clamps max_results to this. Email_Check's MAX_RESULTS must not
+# exceed it, or a full page reads as a short one and its range retires early.
+MAX_SEARCH_RESULTS = 50
 # Enough to build a preview line without pulling whole messages during a search.
 SNIPPET_FETCH_BYTES = 2048
 SNIPPET_CHARS = 200
+# The headers _origin_mailbox reads, which are never reported raw. A header
+# read there but missing here is never fetched, and reads as absent.
+ROUTING_HEADERS = ("TO", "DELIVERED-TO", "X-FORWARDED-FOR", "RETURN-PATH",
+                   "X-MS-EXCHANGE-FORWARDINGLOOP")
 # CONTENT-TYPE is fetched only to make the truncated body chunk parseable as MIME.
-# TO, DELIVERED-TO, X-FORWARDED-FOR and RETURN-PATH feed _origin_mailbox and
-# are never reported raw.
-HEADER_FIELDS = ("SUBJECT FROM DATE LIST-UNSUBSCRIBE CONTENT-TYPE"
-                 " TO DELIVERED-TO X-FORWARDED-FOR RETURN-PATH"
-                 " X-MS-EXCHANGE-FORWARDINGLOOP")
-
-mcp = MCPServer("gmail")
+HEADER_FIELDS = " ".join(("SUBJECT", "FROM", "DATE", "LIST-UNSUBSCRIBE", "CONTENT-TYPE")
+                         + ROUTING_HEADERS)
 
 
 def _credentials(account: str) -> tuple[str, str]:
@@ -103,7 +106,9 @@ def _mailbox(account: str):
     imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
     try:
         imap.login(user, password)
-        imap.select(_all_mail_folder(imap), readonly=True)
+        # Unchecked, a refused SELECT surfaced only at the next command, as a
+        # SEARCH illegal in state AUTH that names the wrong cause.
+        _require_ok(*imap.select(_all_mail_folder(imap), readonly=True))
         yield imap, user
     finally:
         try:
@@ -116,11 +121,13 @@ def _mailbox(account: str):
             pass
 
 
-def _search(imap: imaplib.IMAP4_SSL, query: str, strict: bool = False) -> list[bytes]:
+def _search(imap: imaplib.IMAP4_SSL, query: str) -> list[bytes]:
     """Run a Gmail search string via X-GM-RAW, newest first.
 
-    strict raises on a failed search instead of reading it as no hits, for a
-    caller whose "no hits" gets remembered.
+    A failed search raises rather than reading as no hits. The scheduled check
+    retires a time range on zero hits and the todo page remembers a missing
+    link, so a failure read as empty would skip that range or that link for
+    good.
 
     X-GM-RAW takes the same syntax as the Gmail search box, so `label:`,
     `newer_than:` and `in:anywhere` all work. `in:anywhere` matters because a
@@ -137,12 +144,39 @@ def _search(imap: imaplib.IMAP4_SSL, query: str, strict: bool = False) -> list[b
     # bytes on the continuation, so CHARSET UTF-8 has to precede X-GM-RAW.
     imap.literal = query.encode("utf-8")
     typ, res = imap.uid("SEARCH", "CHARSET", "UTF-8", "X-GM-RAW")
-    if strict:
-        _require_ok(typ, res)
-    if typ != "OK" or not res or not res[0]:
+    _require_ok(typ, res)
+    if not res or not res[0]:
         return []
     # SEARCH returns ascending UIDs; callers want the newest messages first.
     return res[0].split()[::-1]
+
+
+def _uid_for_msgid(imap: imaplib.IMAP4_SSL, message_id: str) -> bytes | None:
+    """The UID of the message with this X-GM-MSGID, or None when there is none.
+
+    ASCII digits only, because imaplib splices the id into the command
+    unquoted, so `1 OR ALL` would run as search syntax, and isdigit alone
+    passes digits such as U+0663 that imaplib cannot encode.
+    """
+    if not (message_id.isascii() and message_id.isdigit()):
+        raise ValueError(f"message id must be ASCII digits, got {message_id!r}")
+    typ, res = imap.uid("SEARCH", "X-GM-MSGID", message_id)
+    _require_ok(typ, res)
+    return res[0].split()[0] if res and res[0] else None
+
+
+def _fetch_literal(imap: imaplib.IMAP4_SSL, uid: bytes, items: str) -> list:
+    """A FETCH that must return message data, or raise.
+
+    imaplib answers OK with [None] for a UID that vanished after the SEARCH
+    that found it. Read as an empty message, it would be a row with no id that
+    the round still counts before retiring its range.
+    """
+    typ, data = imap.uid("FETCH", uid, items)
+    _require_ok(typ, data)
+    if not any(isinstance(part, tuple) for part in data or []):
+        raise imaplib.IMAP4.error(f"FETCH of UID {uid!r} returned no message data")
+    return data
 
 
 def _decode(value: str) -> str:
@@ -276,30 +310,37 @@ def _received(prefix: bytes) -> str:
 
 
 def _metadata(imap: imaplib.IMAP4_SSL, uid: bytes, hub: str, account: str) -> dict:
-    typ, data = imap.uid(
-        "FETCH",
+    data = _fetch_literal(
+        imap,
         uid,
         f"(X-GM-MSGID INTERNALDATE BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})]"
         f" BODY.PEEK[TEXT]<0.{SNIPPET_FETCH_BYTES}>)",
     )
-    if typ != "OK" or not data:
-        return {}
     # imaplib returns one (prefix, literal) tuple per requested item. The prefix
     # names the item, which is the only way to tell the header block from the
-    # body chunk once both are in the same response.
+    # body chunk once both are in the same response. RFC 3501 lets the plain
+    # items come after the last literal instead, as a bare bytes tail, so
+    # X-GM-MSGID and INTERNALDATE are looked for there too.
     msgid, received, header_blob, text_blob = "", "", b"", b""
     for part in data:
-        if not isinstance(part, tuple) or len(part) < 2:
+        raw = part[0] if isinstance(part, tuple) else part
+        if not isinstance(raw, bytes):
             continue
-        prefix = part[0].decode("utf-8", "replace")
+        prefix = raw.decode("utf-8", "replace")
         found = re.search(r"X-GM-MSGID (\d+)", prefix)
         if found:
             msgid = found.group(1)
-        received = received or _received(part[0])
+        received = received or _received(raw)
+        if not isinstance(part, tuple) or len(part) < 2:
+            continue
         if "HEADER" in prefix:
             header_blob = part[1]
         elif "TEXT" in prefix:
             text_blob = part[1]
+    # A row without an id cannot be opened or settled, yet still counts toward
+    # the page the round retires on.
+    if not msgid:
+        raise imaplib.IMAP4.error(f"FETCH of UID {uid!r} carried no X-GM-MSGID")
     headers = email.message_from_bytes(header_blob)
     return {
         "id": msgid,
@@ -319,7 +360,6 @@ def _metadata(imap: imaplib.IMAP4_SSL, uid: bytes, hub: str, account: str) -> di
     }
 
 
-@mcp.tool()
 def get_latest_email(account: str = DEFAULT_ACCOUNT) -> dict:
     """Get subject, sender, date and snippet of the newest email in the INBOX.
 
@@ -329,13 +369,12 @@ def get_latest_email(account: str = DEFAULT_ACCOUNT) -> dict:
     `received` is when this mailbox took delivery, in local time.
     """
     with _mailbox(account) as (imap, hub):
-        uids = _search(imap, "in:inbox", strict=True)
+        uids = _search(imap, "in:inbox")
         if not uids:
             return {"error": f"{account} INBOX is empty"}
         return _metadata(imap, uids[0], hub, account)
 
 
-@mcp.tool()
 def search_emails(query: str = "", max_results: int = 10, account: str = DEFAULT_ACCOUNT) -> list:
     """Search mail with Gmail query syntax, newest first.
 
@@ -347,30 +386,26 @@ def search_emails(query: str = "", max_results: int = 10, account: str = DEFAULT
     came straight in. It also carries `received`, when this mailbox took
     delivery, in local time.
     No hits returns an empty list (may display as no output); a failed search
-    raises an error instead.
+    or fetch raises an error instead.
     """
     with _mailbox(account) as (imap, hub):
-        # strict: the scheduled check retires a time range on zero hits, so a
-        # failed SEARCH read as no mail would skip that range for good.
-        uids = _search(imap, query or "in:inbox", strict=True)
+        uids = _search(imap, query or "in:inbox")
         return [_metadata(imap, uid, hub, account)
-                for uid in uids[: max(1, min(max_results, 50))]]
+                for uid in uids[: max(1, min(max_results, MAX_SEARCH_RESULTS))]]
 
 
-@mcp.tool()
 def get_email_body(message_id: str, account: str = DEFAULT_ACCOUNT) -> str:
     """Get the text body of one email by id (ids come from the other two tools).
 
     account must match the one the id came from — ids are per-mailbox.
+    An id with no message, or a failed fetch, raises an error.
     """
     with _mailbox(account) as (imap, _hub):
-        typ, res = imap.uid("SEARCH", "X-GM-MSGID", message_id)
-        if typ != "OK" or not res or not res[0]:
-            return f"(no message with id {message_id} in {account})"
-        typ, data = imap.uid("FETCH", res[0].split()[0], "(BODY.PEEK[])")
-        if typ != "OK" or not data or not isinstance(data[0], tuple):
-            return "(could not fetch message)"
-        msg = email.message_from_bytes(data[0][1])
+        uid = _uid_for_msgid(imap, message_id)
+        if uid is None:
+            raise LookupError(f"no message with id {message_id} in {account}")
+        data = _fetch_literal(imap, uid, "(BODY.PEEK[])")
+        msg = email.message_from_bytes(next(p for p in data if isinstance(p, tuple))[1])
         plain, html_parts = [], []
         for part in msg.walk():
             if part.get_content_maintype() == "multipart":
@@ -414,14 +449,20 @@ def _require_ok(typ: str, data) -> None:
 def _thread_ids(imap: imaplib.IMAP4_SSL, message_id: str) -> set[int]:
     """X-GM-THRID of every copy of this Message-ID in the selected mailbox."""
     found = set()
-    for uid in _search(imap, f"rfc822msgid:{message_id}", strict=True):
+    for uid in _search(imap, f"rfc822msgid:{message_id}"):
         typ, data = imap.uid("FETCH", uid, "(X-GM-THRID)")
         _require_ok(typ, data)
+        thread = None
         for part in data or []:
             raw = part[0] if isinstance(part, tuple) else part
             hit = re.search(rb"X-GM-THRID (\d+)", raw) if isinstance(raw, bytes) else None
             if hit:
-                found.add(int(hit.group(1)))
+                thread = int(hit.group(1))
+        # A UID that vanished after the SEARCH answers [None], the same case
+        # _fetch_literal raises on, and "no copy here" would be cached as no link.
+        if thread is None:
+            raise imaplib.IMAP4.error(f"FETCH of UID {uid!r} carried no X-GM-THRID")
+        found.add(thread)
     return found
 
 
@@ -481,23 +522,20 @@ def origin_links(hub_ids: list[str],
     of credentials, which otherwise looks the same as any other None.
     """
     links: dict[str, str | None] = {hid: None for hid in hub_ids}
-    # ASCII digits only, because the id is spliced into an IMAP command, and
-    # isdigit alone passes digits such as U+0663 that imaplib cannot encode.
+    # An id that is not a Gmail id can name no message, so it gets None here
+    # rather than the ValueError _uid_for_msgid raises for it.
     wanted = [hid for hid in hub_ids if hid.isascii() and hid.isdigit()]
     if not wanted:
         return links
     pending: dict[str, dict[str, str]] = {}
     with _mailbox(DEFAULT_ACCOUNT) as (imap, hub):
         for hid in wanted:
-            typ, res = imap.uid("SEARCH", "X-GM-MSGID", hid)
-            _require_ok(typ, res)
-            if not res or not res[0]:
+            uid = _uid_for_msgid(imap, hid)
+            if uid is None:
                 continue
-            typ, data = imap.uid("FETCH", res[0].split()[0],
-                                 f"(INTERNALDATE BODY.PEEK[HEADER.FIELDS "
-                                 f"({HEADER_FIELDS} MESSAGE-ID)])")
-            _require_ok(typ, data)
-            prefix, blob = next((p for p in data or [] if isinstance(p, tuple)), (b"", b""))
+            data = _fetch_literal(imap, uid, f"(INTERNALDATE BODY.PEEK[HEADER.FIELDS "
+                                             f"({HEADER_FIELDS} MESSAGE-ID)])")
+            prefix, blob = next(p for p in data if isinstance(p, tuple))
             headers = email.message_from_bytes(blob)
             origin = _origin_mailbox(headers, hub, DEFAULT_ACCOUNT)
             if _exchange_forwarded(headers, origin):
@@ -540,11 +578,11 @@ def origin_links(hub_ids: list[str],
                 # and costs a click.
                 # All three forms worked in the origin account on 2026-10-02.
                 # After a new form or new None rules for an id already looked
-                # up, bump LINKS_VERSION in Daily_Task's
+                # up, bump LINKS_VERSION in
                 # Email_Check/task_list/task_list_gui.py, or the todo page keeps
                 # serving its cached answers.
-                links[hid] = (f"https://mail.google.com/mail/"
-                              f"?authuser={quote(origin, safe='@')}#all/{max(threads):x}")
+                links[hid] = (f"{GMAIL_LINK}?authuser={quote(origin, safe='@')}"
+                              f"#all/{max(threads):x}")
     return links
 
 
@@ -560,8 +598,23 @@ def _check() -> None:
             print(f"{account:6} FAIL  {type(exc).__name__}: {exc}")
 
 
+def build_server():
+    """The MCP server with the three tools registered.
+
+    The MCP SDK is imported here rather than at the top, because the todo page
+    loads this file only for origin_links, and the SDK's import alone took
+    about 2 s of the page's lookup and tied that lookup to the SDK's version.
+    """
+    from mcp.server import MCPServer
+
+    mcp = MCPServer("gmail")
+    for tool in (get_latest_email, search_emails, get_email_body):
+        mcp.tool()(tool)
+    return mcp
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         _check()
     else:
-        mcp.run()  # stdio transport
+        build_server().run()  # stdio transport

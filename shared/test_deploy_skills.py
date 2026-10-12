@@ -227,12 +227,14 @@ def test_only_md_stubs_are_tasks(sb):
 
 def test_corrupt_state_is_an_error(sb):
     sb.add("t1")
-    sb.state.write_text("{not json", encoding="utf-8")
-    try:
-        sb.run()
-        check(False, "a corrupt state file should raise DeployError")
-    except ds.DeployError:
-        pass
+    # Valid JSON of the wrong shape counts as corrupt too.
+    for text in ("{not json", "[]", "null"):
+        sb.state.write_text(text, encoding="utf-8")
+        try:
+            sb.run()
+            check(False, f"a state file holding {text!r} should raise DeployError")
+        except ds.DeployError:
+            pass
 
 
 def test_main_exit_codes(sb):

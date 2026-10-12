@@ -177,7 +177,13 @@ def load_urls() -> tuple[list[str], str]:
         return [], "config.json is not readable JSON"
     if not isinstance(data, dict):
         return [], "config.json is not a JSON object"
+    # Same rule as calendar_urls in statemachine.py, a lone string being a
+    # list of one and any other non-list being none.
     urls = data.get("calendarIcsUrls") or []
+    if isinstance(urls, str):
+        urls = [urls]
+    if not isinstance(urls, list):
+        urls = []
     good = [u for u in urls if isinstance(u, str) and u.startswith("https://")]
     return good, "" if good else "no usable calendarIcsUrls in config.json"
 
@@ -242,9 +248,8 @@ def fetch_all(urls: list[str]) -> tuple[list[dict], list[str]]:
     if dirty:
         try:
             with open(CACHE_PATH, "w", encoding="utf-8", newline="\n") as fh:
-                # Entries for URLs no longer configured are dropped, or a feed
-                # removed from config.json would keep answering out of the
-                # cache file forever.
+                # Entries for URLs no longer configured are dropped, so the
+                # file does not keep every feed ever listed.
                 json.dump({k: v for k, v in cache.items() if k in wanted},
                           fh, ensure_ascii=False)
         except Exception:

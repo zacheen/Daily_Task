@@ -21,7 +21,10 @@ param(
     [switch]$Execute
 )
 
-$dir = Join-Path $env:USERPROFILE ".claude\projects\D--dont-move-git-save-Daily-Task"
+# Claude Code names a project's transcript folder after its path with every
+# character outside A-Z, a-z and 0-9 turned into a hyphen.
+$repo = Split-Path $PSScriptRoot -Parent
+$dir = Join-Path $env:USERPROFILE (".claude\projects\" + ($repo -replace '[^A-Za-z0-9]', '-'))
 
 if (-not (Test-Path $dir)) {
     Write-Output "Transcript directory not found, nothing to do. $dir"

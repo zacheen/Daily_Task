@@ -35,7 +35,8 @@ check("a later month sorts after an earlier one", key("10-2") > key("9-15"),
 check("zero padding does not change the order", key("09-15") == key("9-15"))
 check("slashes parse the same as dashes", key("9/15") == key("9-15"))
 
-# Year-end wrap: a bare MM-DD before today's month belongs to next year.
+# Year-end wrap: a bare MM-DD more than BARE_LOOKBACK months behind today
+# belongs to next year.
 check("January sorts after December", key("01-05") > key("12-30"),
       (key("12-30"), key("01-05")))
 check("next-year January gets next year", key("01-05")[0] == 2027, key("01-05"))
@@ -109,8 +110,8 @@ check("a stale id alongside a live one keeps serving",
       tg.exit_reason(1000 + T + 1, 900,
                      {"old": 1000, "new": 1000 + T}, True) == "")
 
-# The ping interval is hand-typed both in index() and in the PAGE script, with
-# nothing tying them together. A stale placeholder is an undefined JS
+# The __PING_MS__ placeholder is spelled by hand in both index() and the PAGE
+# script, with nothing tying the two together. A stale one is an undefined JS
 # identifier that throws, which silently kills the pagehide listener declared
 # after it in the same script, not just the ping.
 page = tg.index()

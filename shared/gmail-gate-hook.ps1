@@ -24,7 +24,10 @@ try {
     $payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
     if (-not ([string]$payload.prompt).StartsWith('<scheduled-task name="gmail-check-')) { exit 0 }
 
-    $out = & conda run -n ML python 'D:\dont_move\git_save\Daily_Task\Email_Check\statemachine.py' gate
+    # Relative to this script, because a path that stops resolving lands in the
+    # catch below and lets every slot run, which only doubles the usage.
+    $gate = Join-Path (Split-Path $PSScriptRoot -Parent) 'Email_Check\statemachine.py'
+    $out = & conda run -n ML python $gate gate
     $line = $out | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
     $decision = $line | ConvertFrom-Json
     if ($decision.status -eq 'SKIP') {
