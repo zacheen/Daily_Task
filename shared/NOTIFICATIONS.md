@@ -12,7 +12,8 @@ powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.
 
 - `-Message` comes first, `-Title` second and `-Category` last. The order does not affect permission matching, but keeping every caller the same makes them easier to maintain.
 - The caller supplies `-Title`. The default is deliberately neutral, because the script lives in a public repo and its default should not reveal what any task does.
-- `-Category` is optional. A caller that leaves it out lands in `Daily tasks`, which is where every scheduled task of this repo belongs.
+- `-Category` is optional. A caller that leaves it out is filed under its `-Title`, so `Gmail`, `Qualification` and `Event Scout` each get their own app without passing it. Keep such a title a fixed name, because every new title becomes a new app with its own shortcut. A caller that passes neither lands in `Daily tasks`.
+- Pass `-Category` when the title varies, as `RSNA Knee` does with titles such as `RSNA Knee 警告` and `RSNA Knee 結果`.
 - Put no double quotes in the message, because they break the quoting of the calling command. Leave colons out as well, since the fixed toast sentences of Email_Check are tested for both.
 - Do not use the PowerShell call operator form `& "path" ...`. Even with a word-for-word matching rule in both settings files, a scheduled run hung on a permission prompt with no alert at all. The leading suspect is that the command parser treats `&` as a separator, so the prefix match never lines up. The `-File` form above has no `&` and was tested to work.
 - The permission rules end in `*`, so adding `-Category` to a call still matches them.
@@ -25,7 +26,7 @@ Each category now sends under `ClaudeCode.<category without spaces or symbols>`,
 
 Windows accepts toasts from an unpackaged AppId only when a Start menu shortcut carries that id. The first toast of a new category therefore creates `<category>.lnk` under `%APPDATA%\Microsoft\Windows\Start Menu\Programs`, with the AppId written into the shortcut's `System.AppUserModel.ID` property. Opening the shortcut only starts a PowerShell that exits at once. Deleting the shortcut removes the app again.
 
-The categories in use on 2026-10-13 are `Daily tasks`, `RSNA Knee` and `Event Scout`.
+The categories in use on 2026-10-13 are `Gmail`, `Qualification`, `Event Scout` and `RSNA Knee`, plus `Daily tasks` for a call without a title. A shortcut whose category no caller uses any more can simply be deleted.
 
 ## What did not work
 

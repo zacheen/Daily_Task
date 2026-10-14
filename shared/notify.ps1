@@ -24,13 +24,16 @@ Most editors and file-writing tools drop the BOM. Re-add it after any rewrite.
 The $Title and $Category defaults are English because a fixed string cannot
 follow the report language, and neutral because the repo is public and must not
 reveal what a task does. Callers supply a title in that language unless it is a
-fixed name. A caller that passes no -Category lands in "Daily tasks".
+fixed name. A caller that passes no -Category is filed under its title, so the
+title of such a caller must stay a fixed name, or every new title becomes a new
+app with its own shortcut.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Message,
     [string]$Title = "Daily tasks",
-    [string]$Category = "Daily tasks"
+    [string]$Category = ""
 )
+if (-not $Category) { $Category = $Title }
 
 $ErrorActionPreference = "Stop"
 
