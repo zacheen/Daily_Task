@@ -57,6 +57,8 @@ powershell.exe -NoProfile -Command "[Windows.UI.Notifications.ToastNotificationM
 - `DisabledForApplication` means that app was switched off. If it is listed in Settings, switch it on there. If it is not listed, delete its shortcut and send again, which registers it afresh.
 - `History.GetHistory('<AppId>')` on the same class lists the toasts still in the notification centre, which shows whether one was actually delivered.
 
+A toast already in the notification centre stays under the app it was sent from. Changing a caller's category, or the script's default, does not move it. So after such a change, old toasts still showing under the previous app say nothing about whether the change works. Judge it only by a toast sent after the change, or by `History.GetHistory` for the new AppId. This happened on 2026-10-13, when test toasts sent before the title fallback stayed under `Daily tasks`.
+
 A toast Claude Code itself raises, attributed to the Claude app, is not from this script. Its text summarises the session's last reply, so it is easy to mistake for a delivered test toast.
 
 ## Not PushNotification
