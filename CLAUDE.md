@@ -17,6 +17,10 @@ After changing `shared/deploy_skills.py`, run `shared/test_deploy_skills.py` the
 
 After changing `gmail_mcp/server.py`, run `gmail_mcp/test_origin_mailbox.py`, `gmail_mcp/test_origin_links.py` and `gmail_mcp/test_search_emails.py` the same way. All three use fake headers or a fake IMAP, so they need no network and no credentials. `test_search_emails.py` also checks that `MAX_RESULTS` in `statemachine.py` fits under the server's `MAX_SEARCH_RESULTS`. `gmail_mcp/server.py --check` is the live check, which logs in to both mailboxes and prints only their status.
 
+## Notifications
+
+Before doing anything that involves a Windows toast, read `shared/NOTIFICATIONS.md` first. That covers calling `shared/notify.ps1`, adding a project or category that sends toasts, editing the script, and finding out why a toast did not arrive. The script printing `Toast sent.` does not mean Windows showed it, and that file says how to check.
+
 ## Do not edit a scheduled task's SKILL.md directly
 
 Edit the source under `Scheduled_Tasks/` in the repo and deploy it with `shared/deploy_skills.py`, as the README section "How scheduled tasks are wired" describes. An edit made directly to the deployed copy has no version control, and the next deploy treats it as an outside edit and refuses to overwrite it.

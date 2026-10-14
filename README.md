@@ -5,25 +5,13 @@ Every Claude Code scheduled task that runs daily shares this repo. Shared tools 
 ## shared/
 
 ### notify.ps1
-Sends a native Windows toast notification.
-
-Every caller uses the form below, run with the Bash tool.
+Sends a native Windows toast notification, filed under one app per project.
 
 ```
-powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "<message>" -Title "<task name>"
+powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "<message>" -Title "<task name>" -Category "<project>"
 ```
 
-Three constraints
-
-- **Do not use the PowerShell call operator form `& "path" ...`.** It has a known permission-matching failure. Even with a word-for-word matching rule in both settings files, a scheduled run can hang on a permission prompt until someone clicks it, with no alert at all. The cause is not yet known. The leading suspect is that the command parser treats `&` as a separator, so the prefix match never lines up. The `-File` form above has no `&` and was tested to work
-- **`-Message` first, `-Title` second.** The order does not affect permission matching, but keeping every caller the same makes them easier to maintain
-- **The caller supplies `-Title`.** The script's default is deliberately neutral, because the script lives in a public repo and its default should not reveal what any task does
-
-A scheduled task that needs to notify the user always goes through this script, never Claude's built-in PushNotification tool. PushNotification pushes to the phone, which needs Remote Control, and the organization this account belongs to has not granted that permission, so calling it only returns Mobile push not sent and sends nothing. It also suppresses itself when it decides the user is present, and the user is often looking at another session and never sees the scheduled output.
-
-Two pitfalls
-- The script must stay UTF-8 with BOM. It holds only ASCII now that its default title is English, but Windows PowerShell 5.1 decodes a BOM-less .ps1 with the system ANSI code page, so any non-ASCII literal added later would be garbled while arguments passed on the command line stay correct, and the symptom looks like a caller problem. Most editors and file-writing tools strip the BOM, so check again after every edit
-- Do not put double quotes in the message, because they break the quoting of the calling command
+Read [shared/NOTIFICATIONS.md](shared/NOTIFICATIONS.md) before calling it, changing it, adding a project that sends toasts, or chasing a toast that did not arrive. It holds the calling rules, why each project has its own AppId and Start menu shortcut, what was tried and failed, the 2026-10-13 incident and the troubleshooting steps.
 
 ### cleanup-run-transcripts.ps1
 Deletes the transcript files scheduled runs leave behind. It is a dry run by default and deletes only with `-Execute`.
@@ -35,7 +23,7 @@ It keeps transcripts younger than 14 days (`-DaysToKeep`) and never touches a fi
 ### gmail-gate-hook.ps1
 A `UserPromptSubmit` hook that blocks a scheduled Gmail round before the model starts when `Email_Check/statemachine.py gate` answers SKIP, so a skipped round costs no tokens. Every other outcome lets the prompt through, including an error or a timeout, because a wrong block silently loses a check while a wrong pass only costs tokens.
 
-It is registered only in the project's tracked `.claude/settings.json` and not mirrored into `~/.claude/settings.json`, because both layers would check the same prompt twice. It fires on every prompt in this project, interactive ones included, and returns before starting Python unless the prompt opens with the `gmail-check-` scheduled-task marker. Keep the file ASCII, for the BOM reason under notify.ps1.
+It is registered only in the project's tracked `.claude/settings.json` and not mirrored into `~/.claude/settings.json`, because both layers would check the same prompt twice. It fires on every prompt in this project, interactive ones included, and returns before starting Python unless the prompt opens with the `gmail-check-` scheduled-task marker. Keep the file ASCII, for the BOM reason given at the end of shared/NOTIFICATIONS.md.
 
 ### open-task-list.ps1
 Starts the task list page `Email_Check/task_list/task_list_gui.py` detached from the round that calls it. It launches `pythonw.exe` from the ML env through `Start-Process`, so no console window appears and the page outlives the round. Never switch it to `conda run`, which waits for the child process and would block the round until the user closes the page. The interpreter path is built from `$env:USERPROFILE` inside the script, so no instruction file carries the local username. Call it with the same `powershell.exe -NoProfile -File` form as notify.ps1.
