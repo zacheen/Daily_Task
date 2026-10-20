@@ -628,7 +628,7 @@ for raw in (1, 0, -5, True, False, 1.5, "17", None, 10 ** 12):
           tg._is_remind_at(raw) == sm._is_remind_at(raw))
 
 # Every verb the page queues, consumed by the real state machine.
-for name in SHARED + ("ROUND_PATH", "PROGRESS_PATH", "CONFIG_PATH", "DEADLINE_LOG_PATH"):
+for name in SHARED + ("ROUND_PATH", "PROGRESS_PATH", "CONFIG_PATH"):
     setattr(sm, name, os.path.join(work, os.path.basename(getattr(sm, name))))
 write(tg.STATE_PATH, {"horizon": 100, "todos": [
     {"id": "c1", "subject": "done", "priority": "normal"},

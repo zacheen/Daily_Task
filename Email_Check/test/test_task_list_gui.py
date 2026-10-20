@@ -5,7 +5,6 @@ the GUI's copy of the id policy had no net at all. Both exist because of real
 review findings, so they get one here.
 """
 
-import datetime as dt
 import importlib.util
 import os
 import sys
@@ -26,41 +25,20 @@ def check(label, cond, extra=""):
         fails.append(label)
 
 
-TODAY = dt.date(2026, 9, 8)
-key = lambda text: tg._deadline_key(text, TODAY)
+key = tg._deadline_key
 
-# The whole point of parsing: lexicographic order put "10-2" first.
-check("a later month sorts after an earlier one", key("10-2") > key("9-15"),
-      (key("9-15"), key("10-2")))
-check("zero padding does not change the order", key("09-15") == key("9-15"))
-check("slashes parse the same as dashes", key("9/15") == key("9-15"))
-
-# Year-end wrap: a bare MM-DD more than BARE_LOOKBACK months behind today
-# belongs to next year.
-check("January sorts after December", key("01-05") > key("12-30"),
-      (key("12-30"), key("01-05")))
-check("next-year January gets next year", key("01-05")[0] == 2027, key("01-05"))
-check("this-month deadline stays this year", key("09-20")[0] == 2026, key("09-20"))
-
-# A recently overdue bare date must surface, not sink to the bottom. Reading it
-# as next year buried the most urgent item in the list.
-check("last month sorts before this month", key("08-30") < key("09-20"),
-      (key("08-30"), key("09-20")))
-check("recently overdue stays in the current year", key("08-30")[0] == 2026, key("08-30"))
-check("overdue sorts above a future deadline", key("08-30") < key("12-01"),
-      (key("08-30"), key("12-01")))
-# The wrap still has to work for dates far behind the current month.
-check("far-behind months wrap to next year", key("01-05")[0] == 2027, key("01-05"))
-check("January still sorts after December", key("01-05") > key("12-30"))
-
-# An explicit year wins over the wrap heuristic.
+# Lexicographic order put "2026-10-2" first.
+check("a later month sorts after an earlier one", key("2026-10-2") > key("2026-9-15"),
+      (key("2026-9-15"), key("2026-10-2")))
 check("a full date keeps its own year", key("2026-01-05")[0] == 2026, key("2026-01-05"))
 check("explicit years order correctly", key("2027-01-05") > key("2026-12-30"))
 
 # Malformed input must sort last, never raise, never hide the row. 9-15-16-17
 # parses to month 15 of year 9 and used to sort before every real date. Sep 15
-# stands for any notation the parser does not read.
-for bad in ("", "尚未確認", "ASAP", "next week", "9", "--", "9-15-16-17", "Sep 15"):
+# stands for any notation the parser does not read, and 09-15 and 9/15 for a
+# deadline reported without its year.
+for bad in ("", "尚未確認", "ASAP", "next week", "9", "--", "9-15-16-17", "Sep 15",
+            "09-15", "9/15"):
     try:
         k = key(bad)
         ok = isinstance(k, tuple) and k > key("2027-12-31")

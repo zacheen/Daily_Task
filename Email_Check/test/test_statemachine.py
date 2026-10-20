@@ -854,80 +854,19 @@ check("no todos at all does not open it", out["shouldOpenTodoList"] is False)
 
 sm.emit = was_emit
 
-# --- a deadline is resolved to a full date once, at ingest ---
-# Left bare, the year would be re-guessed on every render, so the same
-# unfinished todo could drift from "just overdue" to "next year" by itself.
-import datetime as _dt
-TODAY = _dt.date(2026, 9, 9)
-rd = lambda t: sm.resolve_deadline(t, TODAY)
-
-check("a full date passes through", rd("2026-09-15") == "2026-09-15", rd("2026-09-15"))
-check("an empty deadline stays empty", rd("") == "")
-check("a bare MM-DD gains the current year", rd("09-15") == "2026-09-15", rd("09-15"))
-check("a recently overdue bare date stays in this year",
-      rd("08-30") == "2026-08-30", rd("08-30"))
-check("a far-behind bare date wraps to next year",
-      rd("01-05") == "2027-01-05", rd("01-05"))
-check("slashes are accepted", rd("9/15") == "2026-09-15", rd("9/15"))
-check("unparseable text is returned untouched", rd("ASAP") == "ASAP", rd("ASAP"))
-check("an impossible date is returned untouched", rd("2026-02-31") == "2026-02-31",
-      rd("2026-02-31"))
-check("resolving is idempotent", rd(rd("09-15")) == rd("09-15"))
-
-# The state machine must store the resolved form, so the viewer never re-guesses.
+# --- a deadline is stored as reported, only trimmed ---
+# Text that is no full date stays visible for the viewer to sort last, so a
+# misreported deadline neither fails the round nor hides the row.
 st29 = sm.State({"horizon": 100, "roundSeq": 21})
-st29.reconcile_todos([{"id": "dl1", "subject": "s", "deadline": "09-15"}], set())
-check("reconcile stores a resolved deadline",
-      st29.todos[0]["deadline"].count("-") == 2
-      and st29.todos[0]["deadline"].startswith("20"), st29.todos[0])
-
-# --- a reported deadline that is not a full date is logged once, with its branch ---
-_clear(sm.DEADLINE_LOG_PATH)
-
-
-def logged():
-    if not os.path.exists(sm.DEADLINE_LOG_PATH):
-        return []
-    with open(sm.DEADLINE_LOG_PATH, encoding="utf-8") as fh:
-        return fh.read().splitlines()
-
-
-odd = [{"id": "o1", "subject": "s", "deadline": "Sep 15"},
-       {"id": "o2", "subject": "s", "deadline": "09-15"},
-       {"id": "o3", "subject": "s", "deadline": "2026/9/15"},
-       {"id": "o4", "subject": "s", "deadline": "2026-10-01"},
-       {"id": "o5", "subject": "s", "deadline": ""}]
-st88 = sm.State({"horizon": 100, "roundSeq": 88})
-st88.reconcile_todos(odd, set())
-lines = logged()
-check("only the deadlines not written as YYYY-MM-DD are logged", len(lines) == 3, lines)
-check("each line names the branch that handled it",
-      [l.split()[2] for l in lines] == ["unparsed", "guessed-year", "reformatted"], lines)
-check("with the id and both forms",
-      'id=o1' in lines[0] and 'reported="Sep 15"' in lines[0] and 'stored="Sep 15"' in lines[0],
-      lines[0])
-st88.reconcile_todos(odd, set())
-check("the same todos reconciled again, as every step and commit do, add nothing",
-      len(logged()) == 3, logged())
-st88.reconcile_todos([{"id": "o1", "subject": "s", "deadline": "Sep 16"}], set())
-check("but a changed deadline is logged again", len(logged()) == 4 and "Sep 16" in logged()[-1],
-      logged())
-_was_lines = sm.DEADLINE_LOG_LINES
-sm.DEADLINE_LOG_LINES = 2
-st88.reconcile_todos([{"id": "o6", "subject": "s", "deadline": "soon"}], set())
-check("the log keeps only its last lines", len(logged()) == 2 and "id=o6" in logged()[-1],
-      logged())
-sm.DEADLINE_LOG_LINES = _was_lines
-_was_log = sm.DEADLINE_LOG_PATH
-sm.DEADLINE_LOG_PATH = work  # a directory, so the write fails
-try:
-    st88.reconcile_todos([{"id": "o7", "subject": "s", "deadline": "later"}], set())
-    check("a log that cannot be written does not fail the round",
-          any(t.get("id") == "o7" for t in st88.todos))
-except Exception as exc:
-    check("a log that cannot be written does not fail the round", False, type(exc).__name__)
-sm.DEADLINE_LOG_PATH = _was_log
-_clear(sm.DEADLINE_LOG_PATH)
+st29.reconcile_todos([{"id": "dl1", "subject": "s", "deadline": " 2026-09-15 "},
+                      {"id": "dl2", "subject": "s", "deadline": "09-15"},
+                      {"id": "dl3", "subject": "s", "deadline": "ASAP"},
+                      {"id": "dl4", "subject": "s", "deadline": ""}], set())
+got = {t["id"]: t["deadline"] for t in st29.todos}
+check("a full date is stored trimmed", got["dl1"] == "2026-09-15", got)
+check("a month and day with no year is kept as written", got["dl2"] == "09-15", got)
+check("unparseable text is kept as written", got["dl3"] == "ASAP", got)
+check("an empty deadline stays empty", got["dl4"] == "", got)
 
 # --- compare-and-swap on state.json ---
 # Atomic replace stops a half-written file; it does nothing about one round

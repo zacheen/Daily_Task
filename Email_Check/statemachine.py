@@ -25,7 +25,6 @@ Subcommands
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import json
 import os
 import re
@@ -58,9 +57,6 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 MAX_RESULTS = 40
 MAX_SEARCHES_PER_ROUND = 5
 BOUNDARY_SLACK = 900
-# Months a bare MM-DD may lag the current month before it is read as next year
-# rather than as recently overdue. Mirrors the viewer's own constant.
-BARE_DEADLINE_LOOKBACK = 3
 FIRST_RUN_LOOKBACK = 24 * 3600
 # Must exceed the longest gap between scheduled slots, 8h30m overnight from
 # 22:20 to 06:50, or every morning would report a stall.
@@ -105,13 +101,6 @@ NOTICE_DIR = os.path.join(HERE, "notices")
 FALLBACK_NOTICES = os.path.join(NOTICE_DIR, "en.json")
 # Gitignored, so a fresh clone that has not copied it in gets the fallback.
 LANGUAGE_CONFIG = os.path.join(os.path.dirname(HERE), "shared", "skill_deploy.toml")
-# Temporary diagnostic, removed with the parts Pending_fix.md entry 2 lists.
-# Reported deadlines in any shape but a full date, kept to learn whether other
-# notations ever turn up before the parser is taught them. Covered by the
-# repo's *.log ignore rule. Trimmed to the last DEADLINE_LOG_LINES lines.
-DEADLINE_LOG_PATH = os.path.join(HERE, "deadline-unparsed.log")
-DEADLINE_LOG_LINES = 200
-FULL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _load_notices() -> dict[str, Any]:
@@ -272,36 +261,6 @@ def _usable_id(item: dict) -> str | None:
         return None
     key = str(raw).strip()
     return key if key and key.lower() not in ("none", "null") else None
-
-
-def resolve_deadline(text: str, today: dt.date | None = None) -> str:
-    """A deadline as YYYY-MM-DD, resolved once so it can never be re-read.
-
-    INSTRUCTIONS asks the LLM for a full date, so a bare MM-DD is a contract
-    violation rather than an expected input. It still has to be handled, because
-    leaving it bare means every render re-guesses the year against that day's
-    date, and an unfinished todo could drift from "just overdue" to "next year"
-    on its own. A bare date is read as the recent past for the same reason the
-    viewer does: burying an overdue item is the failure this list exists to
-    prevent. Unparseable text is returned untouched for the viewer to sort last.
-    """
-    raw = (text or "").strip()
-    if not raw:
-        return ""
-    parts = [p for p in raw.replace("/", "-").split("-") if p.strip().isdigit()]
-    nums = [int(p) for p in parts]
-    if len(nums) >= 3:
-        y, m, d = nums[0], nums[1], nums[2]
-    elif len(nums) == 2:
-        today = today or dt.date.today()
-        m, d = nums[0], nums[1]
-        y = today.year + 1 if today.month - m > BARE_DEADLINE_LOOKBACK else today.year
-    else:
-        return raw
-    try:
-        return dt.date(y, m, d).isoformat()
-    except ValueError:
-        return raw
 
 
 def _content_key(item: dict) -> str:
@@ -498,36 +457,6 @@ def _atomic_text(path: str, text: str) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-
-
-def _deadline_branch(reported: str, stored: str) -> str:
-    """Which part of resolve_deadline handled a deadline not already written
-    YYYY-MM-DD. unparsed kept the text, guessed-year supplied a year to a bare
-    month and day, and reformatted only rewrote the separators or padding of
-    a date with a year."""
-    if not FULL_DATE.fullmatch(stored):
-        return "unparsed"
-    numbers = [p for p in reported.replace("/", "-").split("-") if p.strip().isdigit()]
-    return "guessed-year" if len(numbers) == 2 else "reformatted"
-
-
-def _log_odd_deadline(tid: str | None, branch: str, reported: str, stored: str) -> None:
-    """Append one line to DEADLINE_LOG_PATH. A failed write is dropped, since
-    a log must not fail the round it describes. ValueError covers a log file
-    that no longer decodes as UTF-8."""
-    line = (time.strftime("%Y-%m-%d %H:%M:%S") + "  " + branch + "  id=" + str(tid)
-            + "  reported=" + json.dumps(reported, ensure_ascii=False)
-            + "  stored=" + json.dumps(stored, ensure_ascii=False))
-    try:
-        try:
-            with open(DEADLINE_LOG_PATH, encoding="utf-8") as fh:
-                lines = fh.read().splitlines()
-        except FileNotFoundError:
-            lines = []
-        _atomic_text(DEADLINE_LOG_PATH,
-                     "\n".join((lines + [line])[-DEADLINE_LOG_LINES:]) + "\n")
-    except (OSError, ValueError):
-        pass
 
 
 class StaleStateError(Exception):
@@ -799,18 +728,6 @@ class State:
         """
         reported = [{k: v for k, v in r.items() if k not in USER_OWNED}
                     for r in reported]
-        # Temporary, Pending_fix.md entry 2. Only when the stored value would
-        # change, because a round reconciles the same round.json todos again at
-        # every step and at commit.
-        stored = {_usable_id(t): t.get("deadline") for t in self.todos}
-        for item in reported:
-            raw = item.get("deadline")
-            if not isinstance(raw, str) or not raw.strip() or FULL_DATE.fullmatch(raw.strip()):
-                continue
-            resolved = resolve_deadline(raw)
-            key = _usable_id(item)
-            if key is None or stored.get(key) != resolved:
-                _log_odd_deadline(key, _deadline_branch(raw, resolved), raw, resolved)
         kept: dict[str, dict] = {}
         orphans: dict[str, dict] = {}
         for item in list(self.todos) + list(reported):
@@ -830,7 +747,7 @@ class State:
                         merged.pop(owned, None)
             merged.setdefault("createdRound", self.roundSeq)
             if "deadline" in merged:
-                merged["deadline"] = resolve_deadline(merged["deadline"])
+                merged["deadline"] = (merged["deadline"] or "").strip()
             kept[key] = merged
         self.todos = list(kept.values()) + list(orphans.values())
 
@@ -1242,7 +1159,7 @@ _FINDING_ENTRY_TYPES: dict[str, tuple[type, ...]] = {
     "id": (str, int),
     "from": (str,), "subject": (str,), "snippet": (str,), "mailbox": (str,),
     "received": (str,), "action": (str,), "summary": (str,),
-    # resolve_deadline does (text or "").strip()
+    # reconcile_todos does (deadline or "").strip()
     "deadline": (str,),
     # split_debt and cmd_commit both do int() on these
     "firstDeferredRound": (int,), "createdRound": (int,),

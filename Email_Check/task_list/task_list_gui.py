@@ -118,9 +118,6 @@ STARTUP_GRACE = 90
 CLIENT_TIMEOUT = 150
 PING_EVERY_MS = 15000
 WATCHDOG_TICK = 3
-# Months a bare MM-DD may lag the current month before it is treated as next
-# year rather than as recently overdue.
-BARE_LOOKBACK = 3
 # gmail_mcp/ at the repo root. It is loaded on the first lookup, so the page
 # and its tests run without importing it.
 GMAIL_MCP = os.path.join(os.path.dirname(os.path.dirname(HERE)), "gmail_mcp", "server.py")
@@ -353,35 +350,19 @@ def _usable_id(item: dict) -> str | None:
     return key if key and key.lower() not in ("none", "null") else None
 
 
-def _deadline_key(text: str, today: dt.date | None = None) -> tuple:
-    """Sortable (year, month, day) from the free-form deadline the LLM wrote.
-
-    Accepts M-D, MM-DD, M/D and YYYY-MM-DD. INSTRUCTIONS asks for a full date,
-    so the bare forms are a fallback.
-
-    A bare month and day is genuinely ambiguous: on 2026-09-08, `08-30` is
-    either nine days overdue or eleven months away. It is read as the recent
-    past, because burying an overdue item at the bottom of the list is the
-    failure this list exists to prevent, while showing a far-future item too
-    early merely looks odd. Only months more than BARE_LOOKBACK behind wrap to
-    next year, which still keeps `01-05` sorting after `12-30`.
+def _deadline_key(text: str) -> tuple:
+    """Sortable (year, month, day) from a YYYY-MM-DD deadline.
 
     Anything that is no real date sorts last rather than raising, because a
-    malformed deadline must not hide a row. That includes numbers that parse
-    but name no day, such as 9-15-16-17 read as month 15 of year 9, which would
-    otherwise sort before every real date.
+    malformed deadline must not hide a row. That includes a month and day with
+    no year, which INSTRUCTIONS forbids, and numbers that parse but name no
+    day, such as 9-15-16-17 read as month 15 of year 9, which would otherwise
+    sort before every real date.
     """
     last = (9999, 99, 99)
-    today = today or dt.date.today()
-    parts = [p for p in text.replace("/", "-").split("-") if p.strip().isdigit()]
-    nums = [int(p) for p in parts]
+    nums = [int(p) for p in text.split("-") if p.strip().isdigit()]
     if len(nums) >= 3:
         key = (nums[0], nums[1], nums[2])
-    elif len(nums) == 2:
-        month, day = nums[0], nums[1]
-        behind = today.month - month
-        year = today.year + 1 if behind > BARE_LOOKBACK else today.year
-        key = (year, month, day)
     else:
         return last
     try:
@@ -397,7 +378,7 @@ def _due_in(text: str, today: dt.date) -> int | None:
     if not text:
         return None
     try:
-        return (dt.date(*_deadline_key(text, today)) - today).days
+        return (dt.date(*_deadline_key(text)) - today).days
     except (TypeError, ValueError):
         return None
 
@@ -828,7 +809,7 @@ def api_todos():
             "remindIn": remind_in,
         })
     # Level first, then a parsed date rather than the raw string, because
-    # lexicographic order puts "10-2" before "9-15" and shows a later deadline
+    # lexicographic order puts "2026-10-2" before "2026-9-15" and shows a later deadline
     # as the more urgent one. Triage rows all rank last and the page splits them
     # off, so their order is the date order alone.
     rank = {p: i for i, p in enumerate(PRIORITIES)}
