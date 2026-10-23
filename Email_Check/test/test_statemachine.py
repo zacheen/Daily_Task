@@ -854,19 +854,30 @@ check("no todos at all does not open it", out["shouldOpenTodoList"] is False)
 
 sm.emit = was_emit
 
-# --- a deadline is stored as reported, only trimmed ---
-# Text that is no full date stays visible for the viewer to sort last, so a
-# misreported deadline neither fails the round nor hides the row.
-st29 = sm.State({"horizon": 100, "roundSeq": 21})
-st29.reconcile_todos([{"id": "dl1", "subject": "s", "deadline": " 2026-09-15 "},
-                      {"id": "dl2", "subject": "s", "deadline": "09-15"},
-                      {"id": "dl3", "subject": "s", "deadline": "ASAP"},
-                      {"id": "dl4", "subject": "s", "deadline": ""}], set())
+# --- a missing deadline year is supplied once, from the day the mail arrived ---
+rd = lambda t, r="2026-09-09 10:00": sm.resolve_deadline(t, r)
+check("a full date passes through", rd(" 2026-09-15 ") == "2026-09-15", rd(" 2026-09-15 "))
+check("a later month and day gets the arrival year", rd("09-15") == "2026-09-15", rd("09-15"))
+check("slashes are read as dashes", rd("9/15") == "2026-09-15", rd("9/15"))
+check("a recently passed month and day stays overdue in that year",
+      rd("08-30") == "2026-08-30", rd("08-30"))
+check("one more than the lookback behind wraps to next year",
+      rd("05-30") == "2027-05-30", rd("05-30"))
+check("the year comes from the arrival day, not today",
+      rd("01-05", "2026-12-20 08:00") == "2027-01-05", rd("01-05", "2026-12-20 08:00"))
+check("unparseable text is kept as written", rd("ASAP") == "ASAP", rd("ASAP"))
+check("an impossible date is kept as written", rd("2026-02-31") == "2026-02-31",
+      rd("2026-02-31"))
+check("an empty deadline stays empty", rd("") == "")
+check("no arrival day still resolves", rd("09-15", "").count("-") == 2, rd("09-15", ""))
+
+st29 = sm.State({"horizon": 100, "roundSeq": 21,
+                 "todos": [{"id": "old", "subject": "s", "deadline": "09-15"}]})
+st29.reconcile_todos([{"id": "dl1", "subject": "s", "deadline": "09-15",
+                       "received": "2026-09-09 10:00"}], set())
 got = {t["id"]: t["deadline"] for t in st29.todos}
-check("a full date is stored trimmed", got["dl1"] == "2026-09-15", got)
-check("a month and day with no year is kept as written", got["dl2"] == "09-15", got)
-check("unparseable text is kept as written", got["dl3"] == "ASAP", got)
-check("an empty deadline stays empty", got["dl4"] == "", got)
+check("a reported bare deadline is stored resolved", got["dl1"] == "2026-09-15", got)
+check("a stored bare deadline is not rewritten", got["old"] == "09-15", got)
 
 # --- compare-and-swap on state.json ---
 # Atomic replace stops a half-written file; it does nothing about one round

@@ -25,6 +25,7 @@ Subcommands
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -57,6 +58,7 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 MAX_RESULTS = 40
 MAX_SEARCHES_PER_ROUND = 5
 BOUNDARY_SLACK = 900
+BARE_DEADLINE_LOOKBACK = 3
 FIRST_RUN_LOOKBACK = 24 * 3600
 # Must exceed the longest gap between scheduled slots, 8h30m overnight from
 # 22:20 to 06:50, or every morning would report a stall.
@@ -261,6 +263,34 @@ def _usable_id(item: dict) -> str | None:
         return None
     key = str(raw).strip()
     return key if key and key.lower() not in ("none", "null") else None
+
+
+def resolve_deadline(text: str, received: Any = None) -> str:
+    """A reported deadline as YYYY-MM-DD, with a missing year supplied.
+
+    The year is judged against the day the mail arrived, not today, so the
+    same report resolves the same way in every round. A month and day no more
+    than BARE_DEADLINE_LOOKBACK calendar months behind that day's month stays
+    in its year and shows as overdue, because an overdue item pushed to next
+    year sinks to the bottom of the list. Earlier than that it is next year.
+    With no usable arrival day, today stands in. Text that is no date comes
+    back trimmed and unchanged.
+    """
+    raw = (text or "").strip()
+    nums = [int(p) for p in raw.replace("/", "-").split("-") if p.strip().isdigit()]
+    if len(nums) == 2:
+        try:
+            anchor = dt.date.fromisoformat(str(received or "")[:10])
+        except ValueError:
+            anchor = dt.date.today()
+        m, d = nums
+        nums = [anchor.year + (anchor.month - m > BARE_DEADLINE_LOOKBACK), m, d]
+    if len(nums) != 3:
+        return raw
+    try:
+        return dt.date(*nums).isoformat()
+    except ValueError:
+        return raw
 
 
 def _content_key(item: dict) -> str:
@@ -728,6 +758,9 @@ class State:
         """
         reported = [{k: v for k, v in r.items() if k not in USER_OWNED}
                     for r in reported]
+        for r in reported:
+            if isinstance(r.get("deadline"), str):
+                r["deadline"] = resolve_deadline(r["deadline"], r.get("received"))
         kept: dict[str, dict] = {}
         orphans: dict[str, dict] = {}
         for item in list(self.todos) + list(reported):
